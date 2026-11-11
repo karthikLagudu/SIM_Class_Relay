@@ -3,9 +3,9 @@
 ## Boundaries
 
 - `app/web/auth.py`, `teacher.py`, `student.py`, `coordinator.py`, and `files.py` own HTTP/session/form concerns; `helpers.py` holds shared request helpers.
-- `app/telegram/service.py` validates and deduplicates update envelopes; `router.py` handles conversational intent; `conversation.py` persists short-lived context; `files.py` confines downloads; `client.py` is the Bot API boundary.
+- `app/telegram/service.py` validates and deduplicates update envelopes; `router.py` dispatches to `teacher.py` or `student.py`; `conversation.py` persists short-lived context; `files.py` confines downloads; `client.py` is the Bot API boundary.
 - `app/services` owns authorization, classes/invites, assignment mutations, reference resolution, progress, submissions/feedback, notifications, overdue transitions, risk scoring, and the state machine.
-- `app/reminders/scheduler.py` creates durable versioned jobs, `processor.py` re-reads state and executes them, `policy.py` chooses deterministic actions, and `worker.py` polls safely.
+- `app/reminders/scheduler.py` creates durable versioned jobs, `processor.py` re-reads state and executes them, `policy.py` chooses deterministic actions, and `worker.py` polls safely. `app/services/delivery.py` dispatches committed Bot API requests and records results.
 - `app/llm` defines Pydantic schemas, a provider interface, a current OpenAI Responses implementation, a deterministic test/demo implementation, and interaction logging/error containment.
 - `app/models.py` and `app/database.py` own the relational model, foreign keys, constraints, WAL, and transaction primitives.
 
@@ -26,12 +26,13 @@ flowchart TD
     Authorization --> Domain[Deterministic domain service/state machine]
     Domain --> DB[(Domain rows + ActivityEvent)]
     Domain --> NotificationService
-    NotificationService --> TelegramClient
-    TelegramClient --> API[Bot API]
-    TelegramClient --> Log[Log mode / delivery record]
+    NotificationService --> Outbox[(Committed delivery intent)]
+    Outbox --> Dispatcher[DeliveryProcessor]
+    Dispatcher --> TelegramClient --> API[Bot API]
+    NotificationService --> Log[Offline delivery record]
 ```
 
-Unlinked senders receive connection guidance. The bot ignores group chat updates. Callback buttons are translated into the same command path; they do not mutate state directly. Ambiguous references produce choices. A 30-minute context can hold an active assignment or pending file submission, but it is always re-authorized when consumed.
+Unlinked senders receive connection guidance. The bot ignores group chat updates. Callback buttons are translated into the same command path; they do not mutate state directly. Ambiguous references produce choices. A 30-minute context holds the last explicitly selected assignment or a pending teacher/student action. A file-first update stores its Telegram metadata until the student chooses an eligible assignment. Every choice is re-authorized.
 
 Primary student onboarding uses `TelegramLinkService`: an authorized teacher/coordinator creates a high-entropy token for an existing class student, only its SHA-256 digest is persisted, and a private `/start TOKEN` atomically validates membership/conflicts, saves numeric Telegram identifiers, and consumes the token. Regeneration revokes earlier unused tokens. A signed-in teacher can generate their own connection link in an authorized class. A linked student can use `/join CODE` to enroll in a class within their existing school.
 
@@ -61,11 +62,11 @@ The background worker passes no scope and is the system-wide actor. Web callers 
 
 `NotificationService` is the only assignment-related message boundary. Creation, deadline changes, instruction clarification, cancellation, feedback, and reminders all persist `NotificationDelivery` with `school_id`, `classroom_id`, `assignment_id`, recipient, status, body, idempotency key, attempts, and errors. An unlinked student is `skipped`; log mode is `logged`; real Bot API success is `sent`; failures are `failed` and receive bounded 1/5/15-minute retries.
 
-Teacher delivery queries are restricted to assigned class IDs; coordinators may also see school-scoped deliveries for their coordinator schools. External failure does not invalidate a correct domain mutation. The single-process take-home records the intent and failure in the same application transaction; production should use a transactional outbox so a crash between commit and delivery is recoverable without ambiguity.
+Teacher delivery queries are restricted to assigned class IDs; coordinators may also see school-scoped deliveries for their coordinator schools. External failure does not invalidate a correct domain mutation. The business transaction commits pending delivery intents and inline buttons. A short SQLite reservation claims one delivery, then the worker releases the lock before calling Telegram and records the result in a new transaction. A process restart retries expired claims. A crash after Telegram accepts a message and before the result commits can still produce a duplicate.
 
 ## File flow
 
-Telegram document/photo -> `getFile` -> authenticated Bot API download -> streamed size check -> UUID filename under resolved `UPLOAD_DIR` -> SHA-256 hash -> idempotent `Submission`. The original filename is metadata only. Browser uploads use the same path-confinement and byte limit principles.
+Telegram document/photo -> resolve authorized assignment or hold metadata for a reply -> `getFile` -> authenticated Bot API download -> streamed size check -> UUID filename under resolved `UPLOAD_DIR` -> SHA-256 hash -> idempotent `Submission`. The original filename is metadata only. Browser uploads use the same path-confinement and byte limit principles.
 
 Files are not mounted as public static data. `GET /submissions/{id}/file` loads the stored path only after teacher-class or student-owner authorization, verifies the resolved path remains below `UPLOAD_DIR`, and returns 404 for absent/out-of-root files. Images are served inline for previews; other files are attachments.
 

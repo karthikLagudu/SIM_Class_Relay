@@ -34,7 +34,7 @@ Grade 8 - A uses invite `CLASS8A`. Log mode seeds test Telegram IDs for the teac
 |---|---|
 | `DATABASE_URL` | `sqlite:///./classroom_companion.db` |
 | `SESSION_SECRET` | Set a long random value for a shared deployment. Signs sessions and CSRF tokens. |
-| `ENVIRONMENT` | `development`. Use `production` behind HTTPS for secure cookies and to disable demo seeding. |
+| `ENVIRONMENT` | `development`. Use `production` behind HTTPS for secure cookies, required random session signing, and disabled demo seeding. |
 | `SCHOOL_TIMEZONE` | `Asia/Kolkata`, the default IANA timezone for school provisioning. |
 | `LLM_MODE` | `fake` for an offline demo. Set `real` to enable language understanding with OpenAI. |
 | `OPENAI_API_KEY` | Required in real LLM mode. |
@@ -47,7 +47,7 @@ Grade 8 - A uses invite `CLASS8A`. Log mode seeds test Telegram IDs for the teac
 | `TELEGRAM_LINK_TOKEN_MINUTES` | `30` minutes. |
 | `UPLOAD_DIR`, `MAX_UPLOAD_BYTES` | `uploads` and `10485760` bytes (10 MiB). |
 | `QUIET_HOUR_START`, `QUIET_HOUR_END` | School-local `22` and `7`. Equal values disable quiet hours. |
-| `REMINDER_INTERVAL_SECONDS` | `45` seconds. `0` disables the worker for deterministic demo runs. |
+| `REMINDER_INTERVAL_SECONDS` | `45` seconds. `0` pauses reminder evaluation for demos. Committed live Telegram sends are still dispatched. |
 | `CONVERSATION_CONTEXT_MINUTES` | `30` minutes. |
 | `NOTIFICATION_MAX_ATTEMPTS` | `3` total attempts per delivery. |
 
@@ -58,7 +58,7 @@ Grade 8 - A uses invite `CLASS8A`. Log mode seeds test Telegram IDs for the teac
 3. Start the server, then run `python -m scripts.set_telegram_webhook` and `python -m scripts.check_telegram_webhook` from the configured virtual environment. See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for setup and troubleshooting.
 4. Open Grade 8 - A as the teacher, select **Connect my Telegram**, and press **Start** with your Telegram account. Generate Student 1's link and privately open it with a second Telegram account. Leave Student 2 unlinked for the scenario.
 
-Bot commands include `/start`, `/help`, `/classes`, `/assign`, `/status`, `/reminders`, `/join CODE`, `/ack`, `/progress`, `/blocked`, and `/submit`. Use `/progress ID 50` for an explicit percentage or a natural message for interpretation. `/assign CLASS_ID` accepts task text with a deadline. The bot accepts private chats and uses the authenticated link as the sender identity.
+Bot commands include `/start`, `/help`, `/classes`, `/assign`, `/status`, `/reminders`, `/join CODE`, `/ack`, `/progress`, `/blocked`, and `/submit`. `/cancel` clears a pending chat request. `/join CODE EMAIL` also works when the email matches the account already connected. Use `/progress ID 50` for an explicit percentage or a natural message for interpretation. `/assign CLASS_ID` accepts task text with a deadline. The bot accepts private chats and uses the authenticated link as the sender identity. If it needs a choice, reply with the displayed `#ID` or full name. A photo can follow “Here’s my homework.” If the photo arrives first, the bot holds it for up to 30 minutes while you choose an assignment.
 
 ## Architecture
 
@@ -74,8 +74,9 @@ flowchart LR
     SQLite --> Worker[Worker, CLI or scoped web trigger]
     Worker --> Policy[Deterministic reminder policy]
     Policy --> Wording[OpenAI wording or template]
-    Wording --> Delivery[Telegram delivery and bounded retry]
-    Domain --> Delivery
+    Wording --> Outbox[(Committed Telegram delivery intent)]
+    Domain --> Outbox
+    Outbox --> Delivery[Telegram delivery and bounded retry]
 ```
 
 ### Relational model
@@ -134,13 +135,13 @@ Coordinators inherit access to classes in their school. Teachers need class memb
 
 Store instants in UTC and display deadlines in school time. Morning is 09:00, afternoon 15:00, and evening or a bare day 18:00. A bare weekday means its next future occurrence. `Next Friday` refers to the following calendar week. Ask for AM/PM when the intended time is ambiguous. Domain services reject past or timezone-naive deadlines.
 
-Schedule jobs at 24 hours, 2 hours, and shortly after the due time. A near-term assignment skips the overlapping 24-hour job. At send time, final or submitted work is suppressed. Quiet hours defer a job, blockers receive support at most once per 12 hours, and a student without acknowledgement or activity receives a distinct reminder. Recent progress can suppress the 24-hour reminder. Only one overdue notice is attempted per target and deadline version. Deadline changes invalidate old pending jobs and notify the targeted students. The worker, authorized **Run reminders** action, and `python -m scripts.run_reminders` share the policy.
+Schedule jobs at 24 hours, 2 hours, and shortly after the due time. A near-term assignment skips the overlapping 24-hour job. At send time, final or submitted work is suppressed. Quiet hours defer a job, blockers receive support at most once per 12 hours, and a student without acknowledgement or activity receives a distinct reminder. Recent progress can suppress the 24-hour reminder. Work awaiting revision gets a revision-specific reminder. Only one overdue notice is attempted per target and deadline version. Deadline changes invalidate old pending jobs and notify the targeted students. The worker, authorized **Run reminders** action, and `python -m scripts.run_reminders` share the policy.
 
 The OpenAI Responses adapter parses intents and summaries into Pydantic schemas and generates reminder wording. Authorization, class and student matching, state transitions, timing, and routing stay in deterministic code. An uncertain or invalid result asks for clarification. Failed wording uses a deterministic template. Log mode records hypothetical Telegram deliveries, while fake LLM mode is the offline test and review option. [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
 
 ### Idempotency and observability
 
-SQLite reserves the writer before mutations that decide side effects. Telegram claims the update ID with a unique insert in the same transaction as domain changes. Forms, feedback, submissions, and reminder jobs use unique operation or dedupe keys. Domain transactions persist activity and delivery records. Logs carry request/update IDs, delivery outcomes, authorization denials, and sanitized failure types. Interaction audit records can contain classroom content and need appropriate retention and access controls in a pilot.
+SQLite reserves the writer before mutations that decide side effects. Telegram claims the update ID with a unique insert in the same transaction as domain changes. Forms, feedback, submissions, and reminder jobs use unique operation or dedupe keys. Domain transactions persist activity and delivery records. The worker checks committed intents, revalidates recipient and reminder scope, and makes Bot API calls after releasing the write lock. Logs carry request/update IDs, delivery outcomes, authorization denials, and sanitized failure types. Interaction audit records can contain classroom content and need appropriate retention and access controls in a pilot.
 
 ## Verification and operations
 
@@ -150,8 +151,8 @@ python -m pytest -q
 python -m scripts.run_reminders
 ```
 
-Use the virtual environment's Python for these commands. The tests mock the external providers. For the executable offline walkthrough and restart check, follow [DEMO.md](DEMO.md).
+Use the virtual environment's Python for these commands. Tests mock both providers. Transport contract tests exercise the installed OpenAI SDK’s Responses parser and Telegram download and send paths without credentials. GitHub Actions runs Ruff and pytest on Python 3.12 for pushes and pull requests. For the executable offline walkthrough and restart check, follow [DEMO.md](DEMO.md).
 
 ## Pilot limits and production path
 
-Run a single FastAPI process. The SQLite writer reservation can span a model call or Telegram attempt, so throughput is limited and brief write contention can produce a retryable HTTP 503. Telegram has no send idempotency key. A crash or ambiguous timeout after Telegram accepts a message can cause a duplicate delivery despite local dedupe. A pilot with more volume should commit notification intent to an outbox, use PostgreSQL and Alembic, run a durable queue with leased workers, and add observability and dead-letter tools. Use object storage with file scanning and retention, managed sign-in, rate limiting, and a secret manager for a wider deployment. Old demo databases may contain deadlines recorded as wall-clock values by an earlier version. Recheck those deadlines before using existing data in a live pilot.
+Run a single FastAPI process. The SQLite writer reservation can span an interpretation call or inbound file download. Slow providers can cause a retryable HTTP 503 under write contention. Outbound delivery starts after the business transaction commits. Telegram has no send idempotency key. A crash or ambiguous timeout after Telegram accepts a message can cause a duplicate delivery despite local dedupe. For more volume, move the SQLite delivery ledger and domain data to PostgreSQL with Alembic, dispatch through a durable queue with distributed workers, and add observability and dead-letter tools. Use object storage with file scanning and retention, managed sign-in, rate limiting, and a secret manager for a wider deployment. Old demo databases may contain deadlines recorded as wall-clock values by an earlier version. Recheck those deadlines before using existing data in a live pilot.

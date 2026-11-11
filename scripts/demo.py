@@ -78,14 +78,18 @@ def run_demo(base_url: str) -> None:
 
         create_id = next(update_ids)
         response = send(
-            900001, "Give Grade 8-A 10 algebra questions due tomorrow evening.", create_id
+            900001,
+            "Give Grade 8-A questions 1-10 from the energy worksheet by tomorrow evening.",
+            create_id,
         )
         result = response.get("result", "")
         assert result.startswith("assignment:"), response
         assignment_id = int(result.split(":")[-1])
-        assert send(900001, "Give Grade 8-A 10 algebra questions due tomorrow evening.", create_id)[
-            "duplicate"
-        ]
+        assert send(
+            900001,
+            "Give Grade 8-A questions 1-10 from the energy worksheet by tomorrow evening.",
+            create_id,
+        )["duplicate"]
         local_zone = ZoneInfo("Asia/Kolkata")
         tomorrow = datetime.now(local_zone) + timedelta(days=1)
         expected = tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
@@ -97,6 +101,12 @@ def run_demo(base_url: str) -> None:
             "Verified relative deadline, student delivery records, and webhook replay protection."
         )
 
+        moved = send(900001, "Move the energy worksheet to next Friday at 6 PM.")
+        if moved["result"] == "teacher_needs_context":
+            moved = send(900001, f"#{assignment_id}")
+        assert moved["result"] == f"update_assignment_deadline:{assignment_id}", moved
+        detail = teacher.get(detail_url).raise_for_status().text
+        assert "Deadline Updated" in detail and "cancelled" in detail
         deadline_path = f"{detail_url}/deadline"
         due = (datetime.now(UTC) + timedelta(minutes=75)).astimezone(local_zone)
         form = HiddenFields(detail, deadline_path).fields
@@ -108,12 +118,16 @@ def run_demo(base_url: str) -> None:
         student_url = f"/student/assignments/{assignment_id}"
         assert expected in updated and expected in student.get(student_url).raise_for_status().text
         assert "Deadline Updated" in updated and "cancelled" in updated
+        assert send(900101, "/cancel")["result"] == "context_cleared"
         for message, state in (
             ("Got it", "acknowledged"),
             ("I'm halfway done", "in_progress"),
             ("I'm stuck on question 4", "blocked"),
         ):
-            assert send(900101, message)["result"] == f"progress:{assignment_id}:{state}"
+            outcome = send(900101, message)
+            if outcome["result"] == "student_needs_context":
+                outcome = send(900101, f"#{assignment_id}")
+            assert outcome["result"] == f"progress:{assignment_id}:{state}", outcome
 
         reminder_path = "/teacher/reminders/run"
         dashboard = teacher.get("/teacher").raise_for_status().text
