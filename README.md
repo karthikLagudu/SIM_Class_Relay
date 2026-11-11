@@ -1,107 +1,148 @@
 # Classroom Companion
 
-Classroom Companion is a Telegram-first, multi-school assignment workflow built with FastAPI, SQLAlchemy, SQLite, Jinja, and the OpenAI Responses API. Teachers can assign and revise work conversationally, students can acknowledge, report progress or blockers, submit text/files, and receive feedback, while the web UI exposes authorized operational views.
+A Telegram-first assignment workflow with teacher, coordinator, and student web views. Teachers can create, publish, clarify, reschedule, or cancel work, monitor risk, and review submissions. Students can join an authorized class, track deadlines, ask for help, submit text or files, and receive feedback. FastAPI and Jinja serve the UI, SQLAlchemy persists data to SQLite, and an in-process worker handles reminder jobs and delivery retries.
 
-The implementation preserves a strict boundary: the language model interprets text and writes short summaries; deterministic services resolve authorized records, validate transitions, mutate data, schedule jobs, and send notifications.
+This checkout extends the existing Classroom Companion repository at `d7665d7`. It retains the existing implementation and history. [DEMO.md](DEMO.md) contains an executable local acceptance walkthrough and the real Telegram setup flow.
 
-## What works
+## Quick start
 
-- School roles and class memberships support coordinators, teachers in several classes, shared teachers, and class-scoped students.
-- Teachers can create classes, pre-create students, generate/disable expiring invite codes, and inspect onboarding state without editing the database.
-- Authorized teachers/coordinators can generate a hashed, expiring, one-time Telegram deep link for an existing student, revoke it by regeneration, disconnect safely, and reconnect explicitly.
-- Natural-language Telegram flows cover assignment creation, deadline changes, instruction clarification, cancellation, class/risk summaries, acknowledgement, progress, blockers, help, and text submission.
-- Commands remain available as deterministic fallbacks: `/join`, `/assign`, `/ack`, `/progress`, `/blocked`, `/submit`, `/status`, and `/help`.
-- Conversation context is persisted for 30 minutes, enabling “Move it to Friday” and a photo arriving after “Here’s my homework.” Ambiguous or expired context asks the user to choose instead of guessing.
-- Assignment creation, deadline edits, clarification, cancellation, reminders, and feedback use one contextual notification service. Unlinked students produce an explicit `skipped` delivery.
-- Reminder jobs are persisted at 24 hours and 2 hours before each deadline. Deadline edits increment `schedule_version`, cancel prior pending jobs, and create replacement jobs.
-- Reminder processing re-reads live assignment/state data, marks eligible states overdue, suppresses final states, distinguishes blocked/silent/active work, and defers every reminder during school-local quiet hours (22:00-07:00 by default).
-- Manual reminder processing is limited to class IDs calculated from the authenticated teacher/coordinator’s server-side memberships. The system worker and CLI can process all classes.
-- Telegram `getFile` and file download are implemented with size limits, UUID storage names, hashes, timeouts, and authorized file-serving routes. Image submissions render as teacher previews.
-- Telegram assignment messages include acknowledge, blocked, and submit/help buttons. Update IDs, submissions, assignment operations, feedback, notification deliveries, and reminder jobs are idempotent.
-- Delivery failures are persisted and retried at bounded 1/5/15-minute intervals. A valid business mutation is not rolled back solely because Telegram is unavailable.
-- Signed HTTP-only sessions, PBKDF2 password hashing, CSRF forms, scoped database queries, safe paths, and non-leaking authorization errors protect the web surface.
-- GitHub Actions runs Ruff and pytest on push and pull requests. The existing Pages workflow is unchanged.
+From the repository root on Windows with Python 3.12 or newer installed:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+Copy-Item .env.example .env
+.\.venv\Scripts\python.exe -m scripts.seed
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --no-access-log
+```
+
+On macOS or Linux use `.venv/bin/python` and `cp .env.example .env`. Run commands from the repository root so the scripts, templates, static assets, and `.env` resolve correctly. Open `http://127.0.0.1:8000` or check `GET /health`. The seed script initializes a fresh database and can be run again without duplicating the demo school. Startup also creates missing tables and applies additive upgrades. Use a fresh database to get the credentials below if you have demo data from an earlier revision.
+
+| Account | Email | Password |
+|---|---|---|
+| Teacher | `teacher@demo.local` | `Teacher123!` |
+| Linked student in log mode | `student1@demo.local` | `Student123!` |
+| Unlinked student | `student2@demo.local` | `Student123!` |
+| Coordinator | `coordinator@demo.local` | `Coordinator123!` |
+| Teacher from another school | `teacher@northstar.demo.local` | `Teacher123!` |
+
+Grade 8 - A uses invite `CLASS8A`. Log mode seeds test Telegram IDs for the teacher and Student 1. For a live bot, configure real mode before seeding a fresh database and connect the two real accounts using their private links.
+
+## Configuration
+
+| Variable | Default and purpose |
+|---|---|
+| `DATABASE_URL` | `sqlite:///./classroom_companion.db` |
+| `SESSION_SECRET` | Set a long random value for a shared deployment. Signs sessions and CSRF tokens. |
+| `ENVIRONMENT` | `development`. Use `production` behind HTTPS for secure cookies and to disable demo seeding. |
+| `SCHOOL_TIMEZONE` | `Asia/Kolkata`, the default IANA timezone for school provisioning. |
+| `LLM_MODE` | `fake` for an offline demo. Set `real` to enable language understanding with OpenAI. |
+| `OPENAI_API_KEY` | Required in real LLM mode. |
+| `OPENAI_MODEL` | `gpt-5-mini`. Set a model available to your account that supports Structured Outputs. |
+| `LLM_CONFIDENCE_THRESHOLD` | `0.75`. Low-confidence intent needs clarification. |
+| `TELEGRAM_MODE` | `log` for local delivery records or `real` for the Bot API. |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` | BotFather token and bot username. The username enables connection links. |
+| `TELEGRAM_WEBHOOK_SECRET` | Set a long random value in real mode. The webhook verifies both the path and Telegram's matching header. |
+| `BASE_URL` | `http://127.0.0.1:8000`. Set your public HTTPS origin for webhook registration. |
+| `TELEGRAM_LINK_TOKEN_MINUTES` | `30` minutes. |
+| `UPLOAD_DIR`, `MAX_UPLOAD_BYTES` | `uploads` and `10485760` bytes (10 MiB). |
+| `QUIET_HOUR_START`, `QUIET_HOUR_END` | School-local `22` and `7`. Equal values disable quiet hours. |
+| `REMINDER_INTERVAL_SECONDS` | `45` seconds. `0` disables the worker for deterministic demo runs. |
+| `CONVERSATION_CONTEXT_MINUTES` | `30` minutes. |
+| `NOTIFICATION_MAX_ATTEMPTS` | `3` total attempts per delivery. |
+
+### Live Telegram and OpenAI
+
+1. Create a bot with [BotFather](https://t.me/BotFather) and configure its token and username in `.env`. Set `TELEGRAM_MODE=real`, `LLM_MODE=real`, and `OPENAI_API_KEY`.
+2. Generate separate secrets for `SESSION_SECRET` and `TELEGRAM_WEBHOOK_SECRET` using `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Start a public HTTPS tunnel forwarding to local port 8000 and set `BASE_URL` to the tunnel origin. Keep Uvicorn access logging disabled because the webhook path contains the secret. Configure any proxy to redact that path too.
+3. Start the server, then run `python -m scripts.set_telegram_webhook` and `python -m scripts.check_telegram_webhook` from the configured virtual environment. See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for setup and troubleshooting.
+4. Open Grade 8 - A as the teacher, select **Connect my Telegram**, and press **Start** with your Telegram account. Generate Student 1's link and privately open it with a second Telegram account. Leave Student 2 unlinked for the scenario.
+
+Bot commands include `/start`, `/help`, `/classes`, `/assign`, `/status`, `/reminders`, `/join CODE`, `/ack`, `/progress`, `/blocked`, and `/submit`. Use `/progress ID 50` for an explicit percentage or a natural message for interpretation. `/assign CLASS_ID` accepts task text with a deadline. The bot accepts private chats and uses the authenticated link as the sender identity.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    TG[Telegram] --> WH[Secret webhook]
-    WH --> R[Intent router]
-    R --> LLM[Validated structured output]
-    R --> CTX[(Conversation context)]
-    LLM --> AUTH[Scoped reference resolution + authorization]
-    CTX --> AUTH
-    AUTH --> DOMAIN[Domain services + state machine]
-    DOMAIN --> DB[(SQLite)]
-    DOMAIN --> N[Notification service]
-    N --> BOT[Telegram client or log mode]
+    Browser --> FastAPI --> Session[Signed session + CSRF]
+    Telegram --> Webhook[Authenticated webhook + update dedupe]
+    Webhook --> Intent[Typed OpenAI interpretation]
+    Session --> Scope[School, class and owner authorization]
+    Intent --> Scope
+    Scope --> Domain[Assignments, progress, review and feedback]
+    Domain --> SQLite[(SQLite and activity history)]
+    SQLite --> Worker[Worker, CLI or scoped web trigger]
+    Worker --> Policy[Deterministic reminder policy]
+    Policy --> Wording[OpenAI wording or template]
+    Wording --> Delivery[Telegram delivery and bounded retry]
+    Domain --> Delivery
 ```
+
+### Relational model
 
 ```mermaid
-flowchart LR
-    A[Assignment mutation] --> S[Reminder scheduler]
-    S --> J[(Versioned jobs)]
-    J --> W[Worker/manual scoped run]
-    W --> O[Overdue service]
-    O --> P[Policy + quiet hours]
-    P -->|send| N[Notification service]
-    P -->|defer/suppress| J
+erDiagram
+    SCHOOL ||--o{ SCHOOL_MEMBERSHIP : grants
+    USER ||--o{ SCHOOL_MEMBERSHIP : holds
+    SCHOOL ||--o{ CLASSROOM : contains
+    CLASSROOM ||--o{ CLASS_MEMBERSHIP : enrolls
+    USER ||--o{ CLASS_MEMBERSHIP : holds
+    CLASSROOM ||--o{ INVITE : issues
+    CLASSROOM ||--o{ ASSIGNMENT : hosts
+    ASSIGNMENT ||--o{ ASSIGNMENT_TARGET : targets
+    USER ||--o{ ASSIGNMENT_TARGET : receives
+    ASSIGNMENT_TARGET ||--o| STUDENT_ASSIGNMENT_STATE : tracks
+    STUDENT_ASSIGNMENT_STATE ||--o{ PROGRESS_EVENT : records
+    STUDENT_ASSIGNMENT_STATE ||--o{ SUBMISSION : accepts
+    SUBMISSION ||--o{ FEEDBACK : receives
+    ASSIGNMENT ||--o{ REMINDER : schedules
+    ASSIGNMENT ||--o{ NOTIFICATION_DELIVERY : generates
+    USER ||--o{ TELEGRAM_LINK_TOKEN : connects
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for boundaries and [REASONING.md](REASONING.md) for product decisions.
+The state/progress relationship uses the assignment and student pair. SQLite foreign keys, membership and target uniqueness, and deterministic service checks constrain writes. `ActivityEvent`, `LLMInteraction`, `ProcessedTelegramUpdate`, and `IdempotencyKey` preserve audit and retry context.
 
-## Setup
+### Lifecycle and access
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-Copy-Item .env.example .env
-python -m scripts.seed
-python -m uvicorn app.main:app --reload
+The shared assignment moves from draft to assigned to cancelled. Publishing starts one independent state per target and schedules deliveries. Students cannot read drafts. Submitted work can move to revision or completion through teacher feedback. An extension restores the previous work state if the worker marked it overdue. A late submission remains possible.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Assigned
+    Assigned --> Acknowledged
+    Assigned --> InProgress
+    Assigned --> Blocked
+    Acknowledged --> InProgress
+    InProgress --> Blocked
+    Blocked --> InProgress
+    InProgress --> Submitted
+    Blocked --> Submitted
+    Submitted --> NeedsRevision
+    NeedsRevision --> Submitted
+    Submitted --> Completed
+    InProgress --> Overdue
+    Overdue --> Submitted
+    Overdue --> InProgress
+    Assigned --> Cancelled
+    Completed --> [*]
+    Cancelled --> [*]
 ```
 
-Open <http://127.0.0.1:8000>. `python -m scripts.seed` is idempotent. This project uses `create_all` for take-home simplicity; after model changes, remove the disposable local demo database and reseed. Production must use Alembic migrations.
+Coordinators inherit access to classes in their school. Teachers need class membership. Students see only their own targeted work and associated progress, files, reminders, and feedback. An invite permits an already-linked student to join within their school. It cannot link an arbitrary pre-created account. Initial linking uses the one-time private token issued in the authenticated UI. See [REASONING.md](REASONING.md) for state, authorization, and identity trade-offs.
 
-## Environment
+### Time, reminders, and LLM boundary
 
-| Variable | Purpose | Default |
-|---|---|---|
-| `DATABASE_URL` | SQLAlchemy database URL | `sqlite:///./classroom_companion.db` |
-| `SESSION_SECRET` | Session signing secret | development placeholder |
-| `BASE_URL` | Public HTTPS base for Telegram | local URL |
-| `SCHOOL_TIMEZONE` | Provisioning default | `Asia/Kolkata` |
-| `LLM_MODE` | `fake` for tests/offline or `real` | `fake` |
-| `OPENAI_API_KEY` | Required in real LLM mode | blank |
-| `OPENAI_MODEL` | Responses API model | `gpt-5-mini` |
-| `TELEGRAM_MODE` | `log` or `real` | `log` |
-| `TELEGRAM_BOT_TOKEN` | Required in real Telegram mode | blank |
-| `TELEGRAM_BOT_USERNAME` | Bot username used for secure student deep links | blank |
-| `TELEGRAM_WEBHOOK_SECRET` | Unpredictable webhook path segment | local placeholder |
-| `TELEGRAM_LINK_TOKEN_MINUTES` | One-time student link lifetime | `30` |
-| `UPLOAD_DIR` / `MAX_UPLOAD_BYTES` | Confined storage and byte limit | `uploads` / 10 MiB |
-| `QUIET_HOUR_START/END` | School-local no-send window | `22` / `7` |
-| `REMINDER_INTERVAL_SECONDS` | Worker interval; `0` disables | `300` |
-| `CONVERSATION_CONTEXT_MINUTES` | Context expiry | `30` |
-| `NOTIFICATION_MAX_ATTEMPTS` | Bounded delivery attempts | `3` |
+Store instants in UTC and display deadlines in school time. Morning is 09:00, afternoon 15:00, and evening or a bare day 18:00. A bare weekday means its next future occurrence. `Next Friday` refers to the following calendar week. Ask for AM/PM when the intended time is ambiguous. Domain services reject past or timezone-naive deadlines.
 
-## Real OpenAI mode
+Schedule jobs at 24 hours, 2 hours, and shortly after the due time. A near-term assignment skips the overlapping 24-hour job. At send time, final or submitted work is suppressed. Quiet hours defer a job, blockers receive support at most once per 12 hours, and a student without acknowledgement or activity receives a distinct reminder. Recent progress can suppress the 24-hour reminder. Only one overdue notice is attempted per target and deadline version. Deadline changes invalidate old pending jobs and notify the targeted students. The worker, authorized **Run reminders** action, and `python -m scripts.run_reminders` share the policy.
 
-Set `LLM_MODE=real`, `OPENAI_API_KEY`, and an available `OPENAI_MODEL`, then restart. The adapter uses the installed official SDK’s `client.responses.parse(..., text_format=PydanticModel)` API for structured assignment, teacher-intent, student-intent, progress, and risk output, plus `responses.create` for reminder wording. Provider output is schema-validated, confidence-gated, logged without secrets, and never receives authority to query or mutate the database.
+The OpenAI Responses adapter parses intents and summaries into Pydantic schemas and generates reminder wording. Authorization, class and student matching, state transitions, timing, and routing stay in deterministic code. An uncertain or invalid result asks for clarification. Failed wording uses a deterministic template. Log mode records hypothetical Telegram deliveries, while fake LLM mode is the offline test and review option. [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
 
-## Real Telegram mode
+### Idempotency and observability
 
-Create a bot with BotFather, set `TELEGRAM_MODE=real` and `TELEGRAM_BOT_TOKEN`, expose port 8000 through a public HTTPS tunnel, set `BASE_URL` and a long random `TELEGRAM_WEBHOOK_SECRET`, then run:
+SQLite reserves the writer before mutations that decide side effects. Telegram claims the update ID with a unique insert in the same transaction as domain changes. Forms, feedback, submissions, and reminder jobs use unique operation or dedupe keys. Domain transactions persist activity and delivery records. Logs carry request/update IDs, delivery outcomes, authorization denials, and sanitized failure types. Interaction audit records can contain classroom content and need appropriate retention and access controls in a pilot.
 
-```powershell
-python -m scripts.set_telegram_webhook
-python -m scripts.check_telegram_webhook
-```
-
-The endpoint is `POST /telegram/webhook/{TELEGRAM_WEBHOOK_SECRET}` and requires Telegram's matching secret-token header in real mode. The primary onboarding path is an authorized, per-student `/start TOKEN` deep link; `/join CODE EMAIL` remains a fallback. Display names and Telegram usernames are never treated as school identity. See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for exact beginner setup, webhook verification, troubleshooting, and the two-account acceptance test.
-
-## Verification
+## Verification and operations
 
 ```powershell
 python -m ruff check app scripts tests
@@ -109,24 +150,8 @@ python -m pytest -q
 python -m scripts.run_reminders
 ```
 
-Use [DEMO.md](DEMO.md) for the full interview runbook.
+Use the virtual environment's Python for these commands. The tests mock the external providers. For the executable offline walkthrough and restart check, follow [DEMO.md](DEMO.md).
 
-## Demo accounts
+## Pilot limits and production path
 
-All seeded accounts use `DemoPass123!`:
-
-| Role | Email |
-|---|---|
-| Teacher | `teacher@sim.school` |
-| Linked student | `student1@sim.school` |
-| Unlinked/silent student | `student2@sim.school` |
-| Coordinator | `coordinator@sim.school` |
-| Unrelated teacher | `teacher@northstar.school` |
-
-The seeded invite is `SIM8SCI`.
-
-## Known limitations and production path
-
-The take-home intentionally runs one process with SQLite, local uploads, an in-process polling worker, basic sessions, and lightweight onboarding. Log-mode Telegram cannot download a real Telegram file because no Bot API is available; use a normal web upload for offline demos or real mode for Telegram photos. Natural-language quality in real mode depends on the configured model; fake mode is deterministic test/demo scaffolding and is not presented as the required LLM capability.
-
-For production, migrate to PostgreSQL with Alembic, move notification intent to a transactional outbox and durable queue, use distributed/idempotent workers, store uploads in scanned object storage, add managed identity and rate limiting, rotate secrets through a secret manager, and add structured telemetry, alerting, pagination, retention controls, and dead-letter operations.
+Run a single FastAPI process. The SQLite writer reservation can span a model call or Telegram attempt, so throughput is limited and brief write contention can produce a retryable HTTP 503. Telegram has no send idempotency key. A crash or ambiguous timeout after Telegram accepts a message can cause a duplicate delivery despite local dedupe. A pilot with more volume should commit notification intent to an outbox, use PostgreSQL and Alembic, run a durable queue with leased workers, and add observability and dead-letter tools. Use object storage with file scanning and retention, managed sign-in, rate limiting, and a secret manager for a wider deployment. Old demo databases may contain deadlines recorded as wall-clock values by an earlier version. Recheck those deadlines before using existing data in a live pilot.

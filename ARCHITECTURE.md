@@ -31,16 +31,16 @@ flowchart TD
     TelegramClient --> Log[Log mode / delivery record]
 ```
 
-Unknown senders can use only help and `/join CODE EMAIL`. Callback buttons are translated into the same command path; they do not mutate state directly. Ambiguous references produce choices. A 30-minute context can hold an active assignment or pending file submission, but it is always re-authorized when consumed.
+Unlinked senders receive connection guidance. The bot ignores group chat updates. Callback buttons are translated into the same command path; they do not mutate state directly. Ambiguous references produce choices. A 30-minute context can hold an active assignment or pending file submission, but it is always re-authorized when consumed.
 
-Primary student onboarding uses `TelegramLinkService`: an authorized teacher/coordinator creates a high-entropy token for an existing class student, only its SHA-256 digest is persisted, and a private `/start TOKEN` atomically validates membership/conflicts, saves numeric Telegram identifiers, and consumes the token. Regeneration revokes earlier unused tokens. `/join CODE EMAIL` remains a fallback. Neither path treats Telegram names or usernames as identity.
+Primary student onboarding uses `TelegramLinkService`: an authorized teacher/coordinator creates a high-entropy token for an existing class student, only its SHA-256 digest is persisted, and a private `/start TOKEN` atomically validates membership/conflicts, saves numeric Telegram identifiers, and consumes the token. Regeneration revokes earlier unused tokens. A signed-in teacher can generate their own connection link in an authorized class. A linked student can use `/join CODE` to enroll in a class within their existing school.
 
 ## Reminder flow
 
 ```mermaid
 flowchart TD
     Assignment[Assignment create/deadline update] --> Scheduler[ReminderScheduler]
-    Scheduler --> Jobs[(24h + 2h versioned jobs)]
+    Scheduler --> Jobs[(24h, 2h and overdue jobs)]
     Jobs --> Worker[ReminderWorker / CLI / scoped manual trigger]
     Worker --> Processor[ReminderProcessor re-reads current rows]
     Processor --> OverdueService
@@ -53,7 +53,7 @@ flowchart TD
     Wording --> NotificationService
 ```
 
-The database, not memory, is the durable queue. A deadline edit increments `Assignment.schedule_version`, cancels pending/deferred jobs from prior versions, and adds new 24-hour and 2-hour jobs with versioned unique keys. Processing cancels stale versions, transitions eligible states to overdue before policy evaluation, never sends during school-local quiet hours, suppresses cancelled/submitted/completed work, and frequency-limits blocker follow-ups.
+The database, not memory, is the durable queue. A deadline edit increments `Assignment.schedule_version`, cancels pending/deferred jobs from prior versions, and adds new pre-deadline and overdue jobs with versioned unique keys. Processing cancels stale versions, transitions eligible states to overdue before policy evaluation, never sends during school-local quiet hours, suppresses cancelled/submitted/completed work, and frequency-limits blocker follow-ups.
 
 The background worker passes no scope and is the system-wide actor. Web callers calculate authorized class IDs from memberships and pass that set into the same processor. A user-supplied class ID is never used as reminder authority.
 
@@ -71,11 +71,11 @@ Files are not mounted as public static data. `GET /submissions/{id}/file` loads 
 
 ## Transactions and idempotency
 
-- Assignment creation: assignment, targets, independent states, two jobs per student, activity, operation key, and contextual delivery rows.
+- Assignment creation: assignment, targets, independent states, versioned jobs per student, activity, operation key, and contextual delivery rows.
 - Deadline update: aware future-time validation, version increment, prior-job cancellation, replacements, activity, operation key, and student deliveries.
 - Submission: authorized assignment, unique transport/form key, content hash, state transition, and activity.
 - Feedback: unique form key, feedback, review transition, activity, and delivery.
-- Telegram: unique update ID plus result reference; duplicate callbacks/messages exit before dispatch.
+- Telegram: atomically reserve a unique update ID before dispatch and commit it with the operation. Duplicate deliveries exit before any state change.
 - Telegram linking: unique token digest, row lock where supported, expiry/revocation/use checks, Telegram uniqueness, explicit disconnect before account replacement, and one transaction for link plus consumption.
 
 Database uniqueness protects update IDs, operation keys, targets/states, submissions, feedback keys, reminder keys, delivery keys, memberships, and conversation `(user_id, chat_id)`.

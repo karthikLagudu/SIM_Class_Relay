@@ -60,7 +60,7 @@ BotFather creates the Telegram bot identity. It does not create Classroom Compan
 
    ```powershell
    python -m scripts.seed
-   python -m uvicorn app.main:app --reload
+   python -m uvicorn app.main:app --reload --no-access-log
    ```
 
 7. Start your HTTPS tunnel to local port 8000. Set `BASE_URL` to its public HTTPS origin, without a trailing application path. Restart FastAPI after changing `.env`.
@@ -75,7 +75,7 @@ BotFather creates the Telegram bot identity. It does not create Classroom Compan
 9. Open the web application, sign in as a teacher/coordinator, open a class, and add students before linking Telegram.
 10. Use **Generate Telegram link** for a student. Copy it before leaving the page; only its SHA-256 digest is stored, so the raw link cannot be recovered later.
 11. Open the link with the intended Telegram account and press **START**. The student row should change to **Connected** after reloading.
-12. Create an assignment from the class page and select its recipients. Delivery evidence appears on the assignment page and teacher dashboard.
+12. To assign from Telegram, use **Connect my Telegram** on the class page, open the resulting link in your Telegram account, and press **Start**. Create an assignment from the class page and select its recipients. Delivery evidence appears on the assignment page and teacher dashboard.
 13. Run due reminders with `python -m scripts.run_reminders` or the authorized **Run reminders** web action.
 
 ## Where each Telegram setting comes from
@@ -106,7 +106,7 @@ Cloudflare is only a convenient beginner tunnel for local testing. The applicati
 From the repository with the virtual environment activated:
 
 ```powershell
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --no-access-log
 ```
 
 Open <http://127.0.0.1:8000> and confirm the application loads.

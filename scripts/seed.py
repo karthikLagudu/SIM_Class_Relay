@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.auth.security import hash_password
+from app.config import get_settings
 from app.database import SessionLocal, init_db
 from app.models import (
     ClassMembership,
@@ -17,14 +18,11 @@ from app.models import (
 )
 from app.services.assignment import AssignmentService
 
-DEMO_PASSWORD = "DemoPass123!"
-
-
-def add_user(db, name: str, email: str, telegram_id: str | None = None) -> User:
+def add_user(db, name: str, email: str, password: str, telegram_id: str | None = None) -> User:
     user = User(
         name=name,
         email=email,
-        password_hash=hash_password(DEMO_PASSWORD),
+        password_hash=hash_password(password),
         telegram_user_id=telegram_id,
         telegram_chat_id=telegram_id,
     )
@@ -34,6 +32,9 @@ def add_user(db, name: str, email: str, telegram_id: str | None = None) -> User:
 
 
 def main() -> None:
+    settings = get_settings()
+    if settings.environment == "production":
+        raise SystemExit("Demo accounts require a development database.")
     init_db()
     with SessionLocal.begin() as db:
         existing = db.scalar(select(School).where(School.name == "SIM Demo School"))
@@ -44,12 +45,13 @@ def main() -> None:
         other_school = School(name="Northstar Academy", timezone="Asia/Kolkata")
         db.add_all([school, other_school])
         db.flush()
-        teacher = add_user(db, "Maya Teacher", "teacher@sim.school", "900001")
-        student1 = add_user(db, "Aarav Student", "student1@sim.school", "900101")
-        student2 = add_user(db, "Diya Student", "student2@sim.school")
-        coordinator = add_user(db, "Ravi Coordinator", "coordinator@sim.school")
-        outsider = add_user(db, "Nora Teacher", "teacher@northstar.school")
-        class_a = Classroom(school_id=school.id, name="Grade 8 Science", grade="Grade 8")
+        log_mode = settings.telegram_mode == "log"
+        teacher = add_user(db, "Maya Teacher", "teacher@demo.local", "Teacher123!", "900001" if log_mode else None)
+        student1 = add_user(db, "Aarav Student", "student1@demo.local", "Student123!", "900101" if log_mode else None)
+        student2 = add_user(db, "Diya Student", "student2@demo.local", "Student123!")
+        coordinator = add_user(db, "Ravi Coordinator", "coordinator@demo.local", "Coordinator123!")
+        outsider = add_user(db, "Nora Teacher", "teacher@northstar.demo.local", "Teacher123!")
+        class_a = Classroom(school_id=school.id, name="Grade 8 - A", grade="Grade 8")
         class_b = Classroom(school_id=other_school.id, name="Grade 9 Mathematics", grade="Grade 9")
         db.add_all([class_a, class_b])
         db.flush()
@@ -67,7 +69,7 @@ def main() -> None:
                 Invite(
                     school_id=school.id,
                     classroom_id=class_a.id,
-                    code="SIM8SCI",
+                    code="CLASS8A",
                     max_uses=20,
                     use_count=0,
                     active=True,
@@ -94,10 +96,10 @@ def main() -> None:
         state.status = "in_progress"
         state.last_activity_at = datetime.now(UTC)
     print("Seeded Classroom Companion demo data.")
-    print("Teacher: teacher@sim.school / DemoPass123!")
-    print("Students: student1@sim.school and student2@sim.school / DemoPass123!")
-    print("Coordinator: coordinator@sim.school / DemoPass123!")
-    print("Invite: SIM8SCI (use /join SIM8SCI student2@sim.school)")
+    print("Teacher: teacher@demo.local / Teacher123!")
+    print("Students: student1@demo.local and student2@demo.local / Student123!")
+    print("Coordinator: coordinator@demo.local / Coordinator123!")
+    print("Invite: CLASS8A (send /join CLASS8A after connecting your student account)")
 
 
 if __name__ == "__main__":

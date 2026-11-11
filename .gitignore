@@ -13,3 +13,4 @@ htmlcov/
 uploads/*
 !uploads/.gitkeep
 tmp/
+.demo-data/
