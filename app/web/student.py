@@ -10,7 +10,15 @@ from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
 from app.database import get_db
-from app.models import Assignment, Feedback, ProgressEvent, Reminder, StudentAssignmentState, Submission, User
+from app.models import (
+    Assignment,
+    Feedback,
+    ProgressEvent,
+    Reminder,
+    StudentAssignmentState,
+    Submission,
+    User,
+)
 from app.services.assignment import get_student_state
 from app.services.authorization import require_student_assignment, require_student_submission
 from app.services.progress import ProgressService

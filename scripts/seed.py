@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.services.assignment import AssignmentService
 
+
 def add_user(db, name: str, email: str, password: str, telegram_id: str | None = None) -> User:
     user = User(
         name=name,

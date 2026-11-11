@@ -131,3 +131,30 @@ def test_future_deadline_restores_previous_blocked_state(db, data):
     )
     assert state.status == "blocked" and state.block_reason == "Need a hint"
     assert state.last_activity_at == now - timedelta(hours=2)
+
+
+def test_incomplete_attachment_is_ignored(app, db, data):
+    update = telegram_message(1403, 201, "")
+    update["message"]["photo"] = [{"file_unique_id": "missing-download-id"}]
+    result = app.state.telegram_service.process(db, update)
+    assert result == {"ok": True, "result": "ignored"}
+    assert db.scalar(select(func.count()).select_from(Submission)) == 0
+
+
+def test_log_mode_never_retries_live_deliveries(app, db, data, monkeypatch):
+    client = app.state.telegram_client
+    client.settings.telegram_bot_token = "test-token-retained-in-log-mode"
+    monkeypatch.setattr(client, "_attempt_send", lambda *_: None)
+    delivery = NotificationDelivery(
+        user_id=data["student1"].id,
+        chat_id=data["student1"].telegram_chat_id,
+        kind="feedback",
+        body="Test message",
+        status="failed",
+        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
+        attempt_count=1,
+    )
+    db.add(delivery)
+    db.flush()
+    assert client.retry_due(db) == []
+    assert delivery.attempt_count == 1

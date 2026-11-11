@@ -10,7 +10,6 @@ from app.llm.base import LLMProvider
 from app.llm.schemas import AssignmentIntent, ProgressIntent, StudentIntent, TeacherIntent
 from app.models import LLMInteraction
 
-
 logger = logging.getLogger(__name__)
 
 

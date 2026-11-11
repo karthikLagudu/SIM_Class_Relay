@@ -98,6 +98,9 @@ class TelegramService:
             not isinstance(photos, list) or any(not isinstance(photo, dict) for photo in photos)
         ):
             return {"ok": True, "result": "ignored"}
+        attachments = photos if document is None else [document, *photos]
+        if any(not isinstance(item.get("file_id"), str) or not item["file_id"] for item in attachments):
+            return {"ok": True, "result": "ignored"}
         user = db.scalar(select(User).where(User.telegram_user_id == telegram_user_id))
         try:
             result = self._dispatch(db, user, telegram_user_id, chat_id, text, message, update_id)

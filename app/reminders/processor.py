@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.llm.base import LLMProvider
 from app.models import Assignment, LLMInteraction, Reminder, School, StudentAssignmentState, User
-from app.reminders.policy import FINAL_STATES, aware_utc, decide_reminder, in_quiet_hours, next_permitted_time
+from app.reminders.policy import (
+    FINAL_STATES,
+    aware_utc,
+    decide_reminder,
+    in_quiet_hours,
+    next_permitted_time,
+)
 from app.services.notification import NotificationService
 from app.services.overdue import OverdueService
 

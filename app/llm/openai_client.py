@@ -15,7 +15,6 @@ from app.llm.schemas import (
     TeacherIntent,
 )
 
-
 DEADLINE_RULES = (
     "Use 09:00 for morning, 15:00 for afternoon, and 18:00 for evening or a bare day. "
     "A bare weekday is the next occurrence that is in the future. "
