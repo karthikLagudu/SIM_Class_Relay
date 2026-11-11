@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -10,8 +11,11 @@ from app.llm.schemas import AssignmentIntent, ProgressIntent, StudentIntent, Tea
 from app.models import LLMInteraction
 
 
+logger = logging.getLogger(__name__)
+
+
 class LLMService:
-    def __init__(self, provider: LLMProvider, minimum_confidence: float = 0.7):
+    def __init__(self, provider: LLMProvider, minimum_confidence: float = 0.75):
         self.provider = provider
         self.minimum_confidence = minimum_confidence
 
@@ -37,6 +41,7 @@ class LLMService:
             db.flush()
             return parsed
         except LLMInterpretationError:
+            logger.info("llm_clarification_required actor_id=%s", actor_id)
             db.add(
                 LLMInteraction(
                     operation="assignment",
@@ -51,6 +56,7 @@ class LLMService:
             db.flush()
             raise
         except Exception as exc:
+            logger.warning("llm_failed actor_id=%s error_type=%s", actor_id, type(exc).__name__)
             db.add(
                 LLMInteraction(
                     operation="assignment",
@@ -87,6 +93,7 @@ class LLMService:
             db.flush()
             return parsed
         except LLMInterpretationError:
+            logger.info("llm_clarification_required actor_id=%s", actor_id)
             db.add(
                 LLMInteraction(
                     operation="progress",
@@ -101,6 +108,7 @@ class LLMService:
             db.flush()
             raise
         except Exception as exc:
+            logger.warning("llm_failed actor_id=%s error_type=%s", actor_id, type(exc).__name__)
             db.add(
                 LLMInteraction(
                     operation="progress",
@@ -155,6 +163,7 @@ class LLMService:
             db.flush()
             return parsed
         except LLMInterpretationError:
+            logger.info("llm_clarification_required actor_id=%s", actor_id)
             db.add(
                 LLMInteraction(
                     operation=operation,
@@ -169,6 +178,7 @@ class LLMService:
             db.flush()
             raise
         except Exception as exc:
+            logger.warning("llm_failed actor_id=%s error_type=%s", actor_id, type(exc).__name__)
             db.add(
                 LLMInteraction(
                     operation=operation,

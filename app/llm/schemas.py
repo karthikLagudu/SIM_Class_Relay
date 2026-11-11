@@ -47,6 +47,7 @@ class TeacherIntent(BaseModel):
     ]
     assignment_reference: str | None = Field(default=None, max_length=240)
     class_reference: str | None = Field(default=None, max_length=160)
+    student_targets: list[str] = Field(default_factory=list, max_length=50)
     title: str | None = Field(default=None, max_length=240)
     instructions: str | None = Field(default=None, max_length=5000)
     due_expression: str | None = Field(default=None, max_length=240)

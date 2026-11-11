@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
@@ -15,6 +16,15 @@ from app.llm.schemas import (
 )
 
 
+DEADLINE_RULES = (
+    "Use 09:00 for morning, 15:00 for afternoon, and 18:00 for evening or a bare day. "
+    "A bare weekday is the next occurrence that is in the future. "
+    "'Next Friday' means Friday of the following calendar week (Monday through Sunday). "
+    "Ask for clarification if the time lacks AM/PM and is ambiguous or no deadline is given. "
+    "Return an ISO datetime with the offset for the supplied school timezone on that date."
+)
+
+
 class OpenAIProvider(LLMProvider):
     def __init__(self, api_key: str, model: str):
         self.client = OpenAI(api_key=api_key, timeout=20, max_retries=2)
@@ -25,6 +35,7 @@ class OpenAIProvider(LLMProvider):
             model=self.model,
             input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             text_format=schema,
+            store=False,
         )
         if not response.output_parsed:
             raise ValueError("Model returned no validated output")
@@ -35,11 +46,12 @@ class OpenAIProvider(LLMProvider):
     ) -> AssignmentIntent:
         system = (
             "Extract a classroom assignment. Resolve relative dates using the supplied current time and timezone. "
-            "Use clarify when core work or deadline is ambiguous. Do not invent class/user/database identifiers."
+            "Use clarify when core work or deadline is ambiguous. Do not invent class/user/database identifiers. "
+            + DEADLINE_RULES
         )
         return self._structured(
             system,
-            f"Now: {now.isoformat()}\nTimezone: {timezone_name}\nMessage: {text}",
+            f"Now: {now.astimezone(ZoneInfo(timezone_name)).isoformat()}\nTimezone: {timezone_name}\nMessage: {text}",
             AssignmentIntent,
         )
 
@@ -54,8 +66,9 @@ class OpenAIProvider(LLMProvider):
         self, text: str, timezone_name: str, now: datetime
     ) -> TeacherIntent:
         return self._structured(
-            "Classify the teacher's message into the supplied schema. Extract human references only, never IDs unless explicitly written. Resolve relative deadlines from the provided aware current time and IANA timezone. Set requires_clarification when the action, assignment, class, or deadline is unsafe to infer.",
-            f"Now: {now.isoformat()}\nTimezone: {timezone_name}\nMessage: {text}",
+            "Classify the teacher's message into the supplied schema. Extract human references only, never IDs unless explicitly written. For named recipients copy their names or emails verbatim into student_targets. Leave it empty only for class-wide work. Resolve relative deadlines from the provided aware current time and IANA timezone. Set requires_clarification when the action, assignment, class, or deadline is unsafe to infer. "
+            + DEADLINE_RULES,
+            f"Now: {now.astimezone(ZoneInfo(timezone_name)).isoformat()}\nTimezone: {timezone_name}\nMessage: {text}",
             TeacherIntent,
         )
 
@@ -78,6 +91,7 @@ class OpenAIProvider(LLMProvider):
         response = self.client.responses.create(
             model=self.model,
             instructions="Write one short supportive classroom reminder using only supplied facts. Never shame the student.",
+            store=False,
             input=json.dumps({"type": reminder_type, **facts}),
         )
         return response.output_text.strip()

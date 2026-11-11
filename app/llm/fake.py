@@ -35,7 +35,9 @@ class DemoLLM(LLMProvider):
         lower = clean.lower()
         due = local_now + timedelta(days=1)
         due = due.replace(hour=18, minute=0, second=0, microsecond=0)
-        if "tomorrow morning" in lower:
+        if "tomorrow afternoon" in lower:
+            due = due.replace(hour=15)
+        elif "tomorrow morning" in lower:
             due = due.replace(hour=9)
         elif "tomorrow evening" in lower:
             due = due.replace(hour=18)
@@ -46,8 +48,10 @@ class DemoLLM(LLMProvider):
             if match:
                 target = WEEKDAYS[match.group(2)]
                 days = (target - local_now.weekday()) % 7
-                if days == 0 or match.group(1):
-                    days += 7
+                if match.group(1):
+                    days = 7 - local_now.weekday() + target
+                elif days == 0 and local_now.hour >= 18:
+                    days = 7
                 due = (local_now + timedelta(days=days)).replace(
                     hour=18, minute=0, second=0, microsecond=0
                 )
@@ -118,7 +122,7 @@ class DemoLLM(LLMProvider):
                 confidence=0.9,
             )
         assignment = self.interpret_assignment(clean, timezone_name, now)
-        class_match = re.search(r"(grade\s+\d+\s+[a-z]+)", clean, re.IGNORECASE)
+        class_match = re.search(r"(grade\s+\d+(?:\s*-\s*|\s+)[a-z]+)", clean, re.IGNORECASE)
         return TeacherIntent(
             intent="create_assignment" if assignment.intent == "create_assignment" else "clarify",
             class_reference=class_match.group(1) if class_match else None,

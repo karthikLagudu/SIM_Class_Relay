@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     school_timezone: str = "Asia/Kolkata"
     llm_mode: str = "fake"
     openai_api_key: str | None = None
+    llm_confidence_threshold: float = Field(default=0.75, ge=0, le=1)
     openai_model: str = "gpt-5-mini"
     telegram_mode: str = "log"
     telegram_bot_token: str | None = None
@@ -28,9 +29,16 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     quiet_hour_start: int = Field(default=22, ge=0, le=23)
     quiet_hour_end: int = Field(default=7, ge=0, le=23)
-    reminder_interval_seconds: int = Field(default=300, ge=0)
+    reminder_interval_seconds: int = Field(default=45, ge=0)
     conversation_context_minutes: int = Field(default=30, ge=1, le=1440)
     notification_max_attempts: int = Field(default=3, ge=1, le=10)
+
+    @field_validator("llm_mode")
+    @classmethod
+    def validate_llm_mode(cls, value: str) -> str:
+        if value not in {"real", "fake"}:
+            raise ValueError("LLM_MODE must be either 'real' or 'fake'")
+        return value
 
     @field_validator("telegram_mode")
     @classmethod
