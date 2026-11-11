@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.exceptions import ValidationError
 from app.models import ActivityEvent, Assignment, Feedback, Submission, User
 from app.services.assignment import get_student_state
 from app.services.authorization import require_student_assignment, require_teacher_submission
@@ -37,6 +38,17 @@ class SubmissionService:
 
                 raise AuthorizationError("Idempotency key belongs to another operation")
             return existing
+        if text_content is not None:
+            text_content = text_content.strip()
+        if not text_content and not (telegram_file_id or stored_file_path):
+            raise ValidationError("Include your work as text or a file")
+        state = get_student_state(db, assignment_id, student.id)
+        if state.status in {"submitted", "completed", "cancelled"}:
+            raise ValidationError("This assignment is no longer accepting a submission. A teacher can request revision.")
+        now = datetime.now(UTC)
+        if state.status in {"assigned", "acknowledged"}:
+            transition(state, "in_progress", now)
+        transition(state, "submitted", now)
         submission_type = "text" if text_content else "file"
         digest_input = (
             content if content is not None else (text_content or telegram_file_id or "").encode()
@@ -55,11 +67,6 @@ class SubmissionService:
         )
         db.add(submission)
         db.flush()
-        state = get_student_state(db, assignment_id, student.id)
-        now = datetime.now(UTC)
-        if state.status in {"assigned", "acknowledged"}:
-            transition(state, "in_progress", now)
-        transition(state, "submitted", now)
         db.add(
             ActivityEvent(
                 school_id=assignment.school_id,
@@ -101,6 +108,17 @@ class FeedbackService:
         assignment = require_student_assignment(
             db, db.get(User, submission.student_id), submission.assignment_id
         )
+        message = message.strip()
+        if not message:
+            raise ValidationError("Feedback cannot be empty")
+        latest_id = db.scalar(select(Submission.id).where(
+            Submission.assignment_id == submission.assignment_id,
+            Submission.student_id == submission.student_id,
+        ).order_by(Submission.id.desc()).limit(1))
+        state = get_student_state(db, submission.assignment_id, submission.student_id)
+        if latest_id != submission.id or state.status != "submitted":
+            raise ValidationError("Review the latest submission that is awaiting feedback")
+        transition(state, "completed" if complete else "needs_revision", datetime.now(UTC))
         feedback = Feedback(
             submission_id=submission.id,
             assignment_id=submission.assignment_id,
@@ -111,8 +129,6 @@ class FeedbackService:
         )
         db.add(feedback)
         db.flush()
-        state = get_student_state(db, submission.assignment_id, submission.student_id)
-        transition(state, "completed" if complete else "needs_revision", datetime.now(UTC))
         db.add(
             ActivityEvent(
                 school_id=assignment.school_id,
@@ -120,7 +136,7 @@ class FeedbackService:
                 actor_user_id=teacher.id,
                 event_type="feedback_sent",
                 entity_type="feedback",
-                entity_id=None,
+                entity_id=feedback.id,
                 metadata_json={"submission_id": submission.id, "complete": complete},
             )
         )

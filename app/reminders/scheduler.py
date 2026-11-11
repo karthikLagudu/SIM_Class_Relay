@@ -9,7 +9,11 @@ from app.models import Assignment, AssignmentTarget, Reminder
 
 
 class ReminderScheduler:
-    SCHEDULES = (("deadline_24h", timedelta(hours=24)), ("deadline_2h", timedelta(hours=2)))
+    SCHEDULES = (
+        ("deadline_24h", timedelta(hours=24)),
+        ("deadline_2h", timedelta(hours=2)),
+        ("deadline_passed", -timedelta(minutes=1)),
+    )
 
     def schedule_assignment(
         self, db: Session, assignment: Assignment, now: datetime | None = None
@@ -26,6 +30,8 @@ class ReminderScheduler:
         rows: list[Reminder] = []
         for student_id in student_ids:
             for reminder_type, offset in self.SCHEDULES:
+                if reminder_type == "deadline_24h" and due - now <= timedelta(hours=2):
+                    continue  # The short-lead job already covers a newly assigned near deadline.
                 key = (
                     f"assignment:{assignment.id}:student:{student_id}:type:{reminder_type}:"
                     f"version:{assignment.schedule_version}"
@@ -40,7 +46,7 @@ class ReminderScheduler:
                     reminder_type=reminder_type,
                     scheduled_for=max(now, due - offset),
                     status="pending",
-                    reason=f"Persistent {int(offset.total_seconds() // 3600)}-hour deadline job",
+                    reason=f"Scheduled {reminder_type.replace('_', ' ')} job",
                     dedupe_key=key,
                     schedule_version=assignment.schedule_version,
                 )

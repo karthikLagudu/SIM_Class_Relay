@@ -54,12 +54,14 @@ def decide_reminder(
     remaining = due - now
     if remaining.total_seconds() < 0 or state.status == "overdue":
         return ReminderDecision("send", "overdue", "Deadline has passed")
-    if remaining <= timedelta(hours=2):
-        return ReminderDecision("send", "due_within_2h", "Deadline is within two hours")
     if remaining <= timedelta(hours=24):
-        if state.last_activity_at is None:
+        if state.acknowledged_at is None and state.last_activity_at is None:
             return ReminderDecision(
                 "send", "silent_due_soon", "No acknowledgement or activity before deadline"
             )
+        if remaining <= timedelta(hours=2):
+            return ReminderDecision("send", "due_within_2h", "Deadline is within two hours")
+        if state.last_activity_at and now - aware_utc(state.last_activity_at) < timedelta(hours=2):
+            return ReminderDecision("suppress", None, "Student recently reported progress")
         return ReminderDecision("send", "gentle_due_soon", "Active work is due within 24 hours")
     return ReminderDecision("suppress", None, "Deadline is more than 24 hours away")

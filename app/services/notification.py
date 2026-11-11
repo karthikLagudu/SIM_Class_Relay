@@ -51,7 +51,10 @@ class NotificationService:
                         {"text": "Acknowledge", "callback_data": f"ack:{assignment.id}"},
                         {"text": "I'm blocked", "callback_data": f"blocked:{assignment.id}"},
                     ],
-                    [{"text": "Submit / Help", "callback_data": f"help:{assignment.id}"}],
+                    [
+                        {"text": "Submit", "callback_data": f"submit:{assignment.id}"},
+                        {"text": "Ask for help", "callback_data": f"help:{assignment.id}"},
+                    ],
                 ]
             }
         return self.telegram.send(
@@ -71,10 +74,13 @@ class NotificationService:
         self, db: Session, assignment: Assignment
     ) -> list[NotificationDelivery]:
         classroom = db.get(Classroom, assignment.classroom_id)
+        instructions = assignment.instructions
+        if len(instructions) > 1500:
+            instructions = instructions[:1500] + "… Open Classroom Companion for the full instructions."
         body = (
             "📚 New Homework Assigned\n\n"
             f"Assignment:\n{assignment.title}\n\n"
-            f"📝 Instructions:\n{assignment.instructions}\n\n"
+            f"📝 Instructions:\n{instructions}\n\n"
             f"⏰ Due:\n{self.format_deadline(assignment.due_at, assignment.timezone)}\n\n"
             f"Class:\n{classroom.name if classroom else f'Class {assignment.classroom_id}'}"
         )

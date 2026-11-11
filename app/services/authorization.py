@@ -78,7 +78,7 @@ def require_teacher_assignment(db: Session, user: User, assignment_id: int) -> A
 
 def require_student_assignment(db: Session, user: User, assignment_id: int) -> Assignment:
     assignment = db.get(Assignment, assignment_id)
-    if not assignment:
+    if not assignment or assignment.status == "draft":
         raise NotFoundError("Assignment not found")
     require_student_class(db, user, assignment.classroom_id)
     targeted = db.scalar(

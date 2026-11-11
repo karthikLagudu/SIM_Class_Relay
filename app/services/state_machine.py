@@ -7,7 +7,7 @@ from app.models import StudentAssignmentState
 
 FINAL_STATES = {"completed", "cancelled"}
 TRANSITIONS: dict[str, set[str]] = {
-    "assigned": {"acknowledged", "in_progress", "overdue", "cancelled"},
+    "assigned": {"acknowledged", "in_progress", "blocked", "overdue", "cancelled"},
     "acknowledged": {"in_progress", "blocked", "submitted", "overdue", "cancelled"},
     "in_progress": {"blocked", "submitted", "overdue", "cancelled"},
     "blocked": {"in_progress", "submitted", "overdue", "cancelled"},

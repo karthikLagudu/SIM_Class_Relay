@@ -17,8 +17,9 @@ from app.models import (
     User,
 )
 from app.reminders.scheduler import ReminderScheduler
-from app.services.authorization import require_teacher_class
+from app.services.authorization import require_teacher_assignment, require_teacher_class
 from app.services.notification import NotificationService
+from app.services.overdue import OverdueService
 from app.services.state_machine import transition
 
 
@@ -38,17 +39,23 @@ class AssignmentService:
         timezone_name: str,
         idempotency_key: str | None = None,
         student_ids: list[int] | None = None,
+        *,
+        draft: bool = False,
     ) -> Assignment:
         classroom = require_teacher_class(db, actor, classroom_id)
         if due_at.tzinfo is None:
             raise ValidationError("Deadline must include a timezone")
         if due_at <= datetime.now(UTC):
             raise ValidationError("Deadline must be in the future")
+        if not title.strip() or not instructions.strip():
+            raise ValidationError("Title and instructions are required")
         key = idempotency_key or f"assignment:{uuid.uuid4()}"
         existing_key = db.get(IdempotencyKey, key)
         if existing_key and existing_key.result_reference:
             existing = db.get(Assignment, int(existing_key.result_reference))
             if existing:
+                if existing.classroom_id != classroom_id or existing.created_by_user_id != actor.id:
+                    raise ValidationError("This operation key was already used")
                 return existing
         class_students = list(
             db.scalars(
@@ -74,27 +81,21 @@ class AssignmentService:
             created_by_user_id=actor.id,
             title=title.strip(),
             instructions=instructions.strip(),
-            status="assigned",
-            due_at=due_at,
+            status="draft" if draft else "assigned",
+            due_at=due_at.astimezone(UTC),
             timezone=timezone_name,
         )
         db.add(assignment)
         db.flush()
         for student in students:
             db.add(AssignmentTarget(assignment_id=assignment.id, student_id=student.id))
-            db.add(
-                StudentAssignmentState(
-                    assignment_id=assignment.id, student_id=student.id, status="assigned"
-                )
-            )
         db.flush()
-        self.scheduler.schedule_assignment(db, assignment)
         db.add(
             ActivityEvent(
                 school_id=classroom.school_id,
                 classroom_id=classroom_id,
                 actor_user_id=actor.id,
-                event_type="assignment_created",
+                event_type="assignment_drafted" if draft else "assignment_created",
                 entity_type="assignment",
                 entity_id=assignment.id,
                 metadata_json={"title": assignment.title},
@@ -106,8 +107,43 @@ class AssignmentService:
             )
         )
         db.flush()
+        if not draft:
+            self._activate(db, assignment, [student.id for student in students])
+        return assignment
+
+    def _activate(self, db: Session, assignment: Assignment, student_ids: list[int]) -> None:
+        for student_id in student_ids:
+            db.add(StudentAssignmentState(
+                assignment_id=assignment.id, student_id=student_id, status="assigned",
+            ))
+        db.flush()
+        self.scheduler.schedule_assignment(db, assignment)
         if self.notifications:
             self.notifications.notify_assignment_created(db, assignment)
+
+    def publish(self, db: Session, actor: User, assignment_id: int) -> Assignment:
+        assignment = require_teacher_assignment(db, actor, assignment_id)
+        if assignment.status == "assigned":
+            return assignment
+        if assignment.status != "draft":
+            raise ValidationError("Only drafts can be published")
+        if assignment.due_at.replace(tzinfo=assignment.due_at.tzinfo or UTC) <= datetime.now(UTC):
+            raise ValidationError("Set a future deadline before publishing")
+        students = list(db.scalars(select(AssignmentTarget.student_id).where(
+            AssignmentTarget.assignment_id == assignment.id,
+        )))
+        enrolled = set(db.scalars(select(ClassMembership.user_id).where(
+            ClassMembership.classroom_id == assignment.classroom_id, ClassMembership.role == "student",
+        )))
+        if not students or not set(students).issubset(enrolled):
+            raise ValidationError("The draft recipients must still be enrolled in this class")
+        assignment.status = "assigned"
+        db.add(ActivityEvent(
+            school_id=assignment.school_id, classroom_id=assignment.classroom_id,
+            actor_user_id=actor.id, event_type="assignment_published", entity_type="assignment",
+            entity_id=assignment.id, metadata_json={},
+        ))
+        self._activate(db, assignment, students)
         return assignment
 
     def update_deadline(
@@ -118,8 +154,6 @@ class AssignmentService:
         due_at: datetime,
         idempotency_key: str | None = None,
     ) -> Assignment:
-        from app.services.authorization import require_teacher_assignment
-
         assignment = require_teacher_assignment(db, actor, assignment_id)
         if assignment.status == "cancelled":
             raise ValidationError("Cancelled assignments cannot be changed")
@@ -139,10 +173,12 @@ class AssignmentService:
                     )
                 )
             return assignment
-        assignment.due_at = due_at
+        assignment.due_at = due_at.astimezone(UTC)
         assignment.schedule_version += 1
         assignment.updated_at = datetime.now(UTC)
-        self.scheduler.reschedule(db, assignment)
+        if assignment.status == "assigned":
+            OverdueService().restore_after_extension(db, assignment)
+            self.scheduler.reschedule(db, assignment)
         db.add(
             ActivityEvent(
                 school_id=assignment.school_id,
@@ -162,7 +198,7 @@ class AssignmentService:
                     result_reference=str(assignment.id),
                 )
             )
-        if self.notifications:
+        if self.notifications and assignment.status == "assigned":
             self.notifications.notify_deadline_changed(db, assignment, old_aware)
         return assignment
 
@@ -174,8 +210,6 @@ class AssignmentService:
         instructions: str,
         idempotency_key: str | None = None,
     ) -> Assignment:
-        from app.services.authorization import require_teacher_assignment
-
         assignment = require_teacher_assignment(db, actor, assignment_id)
         if assignment.status == "cancelled":
             raise ValidationError("Cancelled assignments cannot be changed")
@@ -208,7 +242,7 @@ class AssignmentService:
                     result_reference=str(assignment.id),
                 )
             )
-        if self.notifications:
+        if self.notifications and assignment.status == "assigned":
             self.notifications.notify_instructions_changed(db, assignment, operation_key)
         return assignment
 
@@ -219,12 +253,11 @@ class AssignmentService:
         assignment_id: int,
         idempotency_key: str | None = None,
     ) -> Assignment:
-        from app.services.authorization import require_teacher_assignment
-
         assignment = require_teacher_assignment(db, actor, assignment_id)
         if assignment.status == "cancelled":
             return assignment
         now = datetime.now(UTC)
+        was_assigned = assignment.status == "assigned"
         assignment.status = "cancelled"
         assignment.cancelled_at = now
         for state in db.scalars(
@@ -254,7 +287,7 @@ class AssignmentService:
                     result_reference=str(assignment.id),
                 )
             )
-        if self.notifications:
+        if self.notifications and was_assigned:
             self.notifications.notify_assignment_cancelled(db, assignment)
         return assignment
 

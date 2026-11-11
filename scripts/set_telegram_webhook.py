@@ -26,7 +26,7 @@ def main() -> None:
                 "url": url,
                 "secret_token": settings.telegram_webhook_secret,
                 "drop_pending_updates": False,
-                "allowed_updates": ["message", "edited_message", "callback_query"],
+                "allowed_updates": ["message", "callback_query"],
             },
             timeout=20,
         )

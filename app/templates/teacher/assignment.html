@@ -7,17 +7,23 @@
     <p class="eyebrow">ASSIGNMENT #{{ assignment.id }}</p>
     <h1>{{ assignment.title }}</h1>
     <p>{{ assignment.instructions }}</p>
-    <strong class="due-line">Due {{ assignment.due_at.strftime('%A, %d %B at %I:%M %p') }}</strong>
+    <strong class="due-line">Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</strong>
   </div>
   <b class="badge large {{ assignment.status }}">{{ assignment.status }}</b>
 </div>
+{% if assignment.status == 'draft' %}
+<form class="card" method="post" action="/teacher/assignments/{{ assignment.id }}/publish">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button class="primary">Publish assignment</button>
+</form>
+{% endif %}
 <div class="grid three">
   <form class="card stack" method="post" action="/teacher/assignments/{{ assignment.id }}/deadline">
     <p class="eyebrow">SCHEDULE</p>
     <h2>Deadline</h2>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="idempotency_key" value="{{ deadline_key }}">
-    <label>New local deadline<input type="datetime-local" name="due_at" required></label>
+    <label>New deadline ({{ assignment.timezone }})<input type="datetime-local" name="due_at" required></label>
     <button>Update deadline</button>
   </form>
   <form class="card stack" method="post" action="/teacher/assignments/{{ assignment.id }}/instructions">
@@ -49,7 +55,7 @@
   <section class="card">
     <p class="eyebrow">AUTOMATION</p>
     <h2>Reminder jobs</h2>
-    <div class="list">{% for r in reminders %}<div class="list-row"><div><strong>{{ r.reminder_type|replace('_',' ')|title }}</strong><span>Student #{{ r.student_id }} · {{ r.scheduled_for.strftime('%d %b, %I:%M %p') }} · version {{ r.schedule_version }}</span></div><b class="badge {{ r.status }}">{{ r.status }}</b></div>{% else %}<p class="empty">No reminder jobs.</p>{% endfor %}</div>
+    <div class="list">{% for r in reminders %}<div class="list-row"><div><strong>{{ r.reminder_type|replace('_',' ')|title }}</strong><span>Student #{{ r.student_id }} · {{ r.scheduled_for|local_deadline(assignment.timezone) }} · version {{ r.schedule_version }}</span></div><b class="badge {{ r.status }}">{{ r.status }}</b></div>{% else %}<p class="empty">No reminder jobs.</p>{% endfor %}</div>
   </section>
   <section class="card">
     <p class="eyebrow">DELIVERY</p>

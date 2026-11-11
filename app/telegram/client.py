@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -9,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.exceptions import TelegramDeliveryError
-from app.models import NotificationDelivery, User
+from app.models import Assignment, NotificationDelivery, Reminder, StudentAssignmentState, User
+from app.reminders.policy import FINAL_STATES, decide_reminder, in_quiet_hours, next_permitted_time
 
 logger = logging.getLogger(__name__)
 RETRY_DELAYS = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15))
@@ -58,6 +60,8 @@ class TelegramClient:
             )
             if existing:
                 return existing
+        if len(body.encode("utf-16-le")) > 8192:
+            body = body.encode("utf-16-le")[:8190].decode("utf-16-le", errors="ignore") + "…"
         target = chat_id or (user.telegram_chat_id if user else None)
         delivery = NotificationDelivery(
             user_id=user.id if user else None,
@@ -78,12 +82,13 @@ class TelegramClient:
             return delivery
         if self.settings.telegram_mode == "log":
             logger.info(
-                "telegram_delivery_logged school_id=%s classroom_id=%s assignment_id=%s user_id=%s kind=%s",
+                "telegram_delivery_logged school_id=%s classroom_id=%s assignment_id=%s user_id=%s kind=%s body=%r",
                 school_id,
                 classroom_id,
                 assignment_id,
                 delivery.user_id,
                 kind,
+                body,
             )
             delivery.status = "logged"
             delivery.attempt_count = 1
@@ -131,6 +136,8 @@ class TelegramClient:
             )
 
     def retry_due(self, db: Session, now: datetime | None = None) -> list[NotificationDelivery]:
+        if self.settings.telegram_mode != "real":
+            return []
         now = now or datetime.now(UTC)
         rows = list(
             db.scalars(
@@ -142,7 +149,39 @@ class TelegramClient:
             )
         )
         for delivery in rows:
-            self._attempt_send(delivery)
+            assignment = db.get(Assignment, delivery.assignment_id) if delivery.assignment_id else None
+            user = db.get(User, delivery.user_id) if delivery.user_id else None
+            key = delivery.idempotency_key or ""
+            reminder = None
+            if key.startswith("reminder:"):
+                reminder = db.scalar(select(Reminder).where(Reminder.dedupe_key == key.removeprefix("reminder:")))
+            stale = user is not None and delivery.chat_id != user.telegram_chat_id
+            if assignment:
+                stale = stale or (assignment.status == "cancelled" and delivery.kind != "assignment_cancelled")
+                if delivery.kind == "deadline_updated":
+                    stale = stale or not key.startswith(f"deadline:{assignment.id}:v{assignment.schedule_version}:")
+            if reminder and assignment:
+                state = db.scalar(select(StudentAssignmentState).where(
+                    StudentAssignmentState.assignment_id == assignment.id,
+                    StudentAssignmentState.student_id == reminder.student_id,
+                ))
+                stale = stale or reminder.schedule_version != assignment.schedule_version or not state or state.status in FINAL_STATES
+                if not stale and state:
+                    stale = decide_reminder(state, assignment, now).reminder_type != reminder.reminder_type
+                local_now = now.astimezone(ZoneInfo(assignment.timezone))
+                start, end = self.settings.quiet_hour_start, self.settings.quiet_hour_end
+                if not stale and in_quiet_hours(local_now, start, end):
+                    delivery.next_attempt_at = next_permitted_time(now, assignment.timezone, start, end)
+                    continue
+            if stale:
+                delivery.status = "skipped"
+                delivery.error = "Recipient or assignment context has changed"
+                delivery.next_attempt_at = None
+            else:
+                self._attempt_send(delivery)
+            if reminder:
+                reminder.status = delivery.status
+                reminder.sent_at = now if delivery.status == "sent" else None
         return rows
 
     def get_file_path(self, file_id: str) -> str:

@@ -18,10 +18,14 @@ class RiskItem:
     risk_score: int
     risk_level: str
     reasons: tuple[str, ...]
+    deadline: datetime
+    last_activity: datetime | None
 
 
 class RiskService:
-    def for_actor(self, db: Session, actor: User, now: datetime | None = None) -> list[RiskItem]:
+    def for_actor(
+        self, db: Session, actor: User, now: datetime | None = None, *, classroom_id: int | None = None
+    ) -> list[RiskItem]:
         now = now or datetime.now(UTC)
         coordinator_schools = select(SchoolMembership.school_id).where(
             SchoolMembership.user_id == actor.id,
@@ -31,7 +35,7 @@ class RiskService:
             ClassMembership.user_id == actor.id,
             ClassMembership.role == "teacher",
         )
-        rows = db.execute(
+        query = (
             select(StudentAssignmentState, User, Assignment)
             .join(User, User.id == StudentAssignmentState.student_id)
             .join(Assignment, Assignment.id == StudentAssignmentState.assignment_id)
@@ -42,7 +46,10 @@ class RiskService:
                     Assignment.classroom_id.in_(teacher_classes),
                 ),
             )
-        ).all()
+        )
+        if classroom_id is not None:
+            query = query.where(Assignment.classroom_id == classroom_id)
+        rows = db.execute(query).all()
         result: list[RiskItem] = []
         for state, student, assignment in rows:
             if state.status in {"submitted", "completed", "cancelled"}:
@@ -50,7 +57,10 @@ class RiskService:
             score = 0
             reasons: list[str] = []
             due = assignment.due_at.replace(tzinfo=assignment.due_at.tzinfo or UTC)
-            if state.status == "blocked":
+            if state.status == "needs_revision":
+                score += 45
+                reasons.append("needs revision")
+            if state.status == "blocked" or (state.status == "overdue" and state.block_reason):
                 score += 70
                 reasons.append("blocked")
             if state.status == "overdue" or due < now:
@@ -82,6 +92,8 @@ class RiskService:
                     risk_score=score,
                     risk_level=level,
                     reasons=tuple(reasons),
+                    deadline=due,
+                    last_activity=state.last_activity_at,
                 )
             )
         return sorted(result, key=lambda item: (-item.risk_score, item.student_name))

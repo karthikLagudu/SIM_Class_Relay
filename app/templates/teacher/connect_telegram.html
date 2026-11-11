@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Connect Telegram{% endblock %}
+{% block content %}
+<a class="back" href="/teacher/classes/{{ class_id }}">Back to class</a>
+<section class="card">
+  <h1>Connect your Telegram account</h1>
+  <p>Open the link in your own Telegram account and press Start. It expires at {{ link.expires_at.strftime('%H:%M UTC') }}.</p>
+  <a class="button" href="{{ link.url }}" rel="noreferrer">Open Telegram</a>
+</section>
+{% endblock %}

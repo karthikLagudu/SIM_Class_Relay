@@ -4,13 +4,13 @@ import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.llm.base import LLMProvider
 from app.models import Assignment, LLMInteraction, Reminder, School, StudentAssignmentState, User
-from app.reminders.policy import decide_reminder, in_quiet_hours, next_permitted_time
+from app.reminders.policy import FINAL_STATES, aware_utc, decide_reminder, in_quiet_hours, next_permitted_time
 from app.services.notification import NotificationService
 from app.services.overdue import OverdueService
 
@@ -49,7 +49,11 @@ class ReminderProcessor:
             .join(School, School.id == Assignment.school_id)
             .where(
                 Reminder.status.in_(["pending", "deferred"]),
-                Reminder.scheduled_for <= now,
+                or_(
+                    Reminder.scheduled_for <= now,
+                    Assignment.status == "cancelled",
+                    StudentAssignmentState.status.in_(FINAL_STATES),
+                ),
             )
             .order_by(Reminder.scheduled_for, Reminder.id)
         )
@@ -66,6 +70,13 @@ class ReminderProcessor:
                 processed.append(reminder)
                 continue
             self.overdue.mark_overdue(db, assignment, state, now)
+            decision = decide_reminder(state, assignment, now)
+            if decision.action == "suppress":
+                reminder.status = "suppressed"
+                reminder.reason = decision.reason
+                reminder.processed_at = now
+                processed.append(reminder)
+                continue
             local_now = now.astimezone(ZoneInfo(school.timezone))
             if in_quiet_hours(
                 local_now, self.settings.quiet_hour_start, self.settings.quiet_hour_end
@@ -86,37 +97,47 @@ class ReminderProcessor:
                     reminder.scheduled_for,
                 )
                 continue
-            decision = decide_reminder(state, assignment, now)
-            if decision.action == "suppress":
+            duplicate = select(Reminder.id).where(
+                Reminder.assignment_id == assignment.id,
+                Reminder.student_id == student.id,
+                Reminder.status.in_(["sent", "skipped", "failed"]),
+            )
+            if decision.reminder_type == "overdue":
+                duplicate = duplicate.where(
+                    Reminder.reminder_type == "overdue",
+                    Reminder.schedule_version == assignment.schedule_version,
+                )
+            elif decision.reminder_type == "blocked_support":
+                duplicate = duplicate.where(
+                    Reminder.reminder_type == "blocked_support",
+                    Reminder.processed_at >= now - timedelta(hours=12),
+                )
+            else:
+                duplicate = duplicate.where(
+                    Reminder.reminder_type.in_(["silent_due_soon", "gentle_due_soon", "due_within_2h"]),
+                    Reminder.processed_at >= now - timedelta(hours=1),
+                )
+            if db.scalar(duplicate.limit(1)):
                 reminder.status = "suppressed"
-                reminder.reason = decision.reason
+                reminder.reason = "Recent or already attempted reminder"
                 reminder.processed_at = now
                 processed.append(reminder)
                 continue
-            if decision.reminder_type == "blocked_support":
-                recent = db.scalar(
-                    select(Reminder.id).where(
-                        Reminder.assignment_id == assignment.id,
-                        Reminder.student_id == student.id,
-                        Reminder.reminder_type == "blocked_support",
-                        Reminder.sent_at >= now - timedelta(hours=12),
-                    )
-                )
-                if recent:
-                    reminder.status = "suppressed"
-                    reminder.reason = "Blocked follow-up frequency limit"
-                    reminder.processed_at = now
-                    processed.append(reminder)
-                    continue
             facts = {
                 "student": student.name,
                 "title": assignment.title,
+                "state": state.status,
+                "reason": decision.reason,
+                "blocker": state.block_reason or "",
+                "time_remaining_minutes": str(round((aware_utc(assignment.due_at) - now).total_seconds() / 60)),
                 "due": assignment.due_at.replace(
                     tzinfo=assignment.due_at.tzinfo or UTC
                 ).astimezone(ZoneInfo(school.timezone)).strftime("%d %b %Y, %I:%M %p %Z"),
             }
             try:
-                body = self.llm.write_reminder(str(decision.reminder_type), facts)
+                body = self.llm.write_reminder(str(decision.reminder_type), facts).strip()
+                if not body or len(body) > 700:
+                    raise ValueError("Invalid reminder wording")
                 db.add(
                     LLMInteraction(
                         operation="reminder_wording",
@@ -128,7 +149,15 @@ class ReminderProcessor:
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - provider failures use deterministic fallback
-                body = f"Reminder: {assignment.title} is due {facts['due']}. Reply with progress or ask for help."
+                logger.warning("llm_failed operation=reminder_wording assignment_id=%s", assignment.id)
+                if decision.reminder_type == "blocked_support":
+                    body = f"Need a hand with {assignment.title}? Reply with the part that's holding you up."
+                elif decision.reminder_type == "overdue":
+                    body = f"{assignment.title} was due {facts['due']}. You can still submit or ask for help."
+                elif decision.reminder_type == "silent_due_soon":
+                    body = f"Have you seen {assignment.title}? It's due {facts['due']}. Reply to acknowledge it."
+                else:
+                    body = f"Reminder: {assignment.title} is due {facts['due']}. Reply with progress or ask for help."
                 db.add(
                     LLMInteraction(
                         operation="reminder_wording",
@@ -153,5 +182,10 @@ class ReminderProcessor:
             reminder.processed_at = now
             reminder.status = "sent" if delivery.status in {"sent", "logged"} else delivery.status
             reminder.sent_at = now if reminder.status == "sent" else None
+            db.flush()  # Later jobs in the same batch must see the delivery we just attempted.
+            logger.info(
+                "reminder_%s assignment_id=%s student_id=%s kind=%s",
+                reminder.status, assignment.id, student.id, reminder.reminder_type,
+            )
             processed.append(reminder)
         return processed

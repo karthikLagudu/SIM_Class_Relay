@@ -32,7 +32,7 @@ class InviteService:
                 )
             )
         )
-        if school_ids and invite.school_id not in school_ids:
+        if invite.school_id not in school_ids:
             raise InviteError("Invite is for a different school")
         existing_tg = db.scalar(
             select(User).where(User.telegram_user_id == telegram_user_id, User.id != user.id)
@@ -51,8 +51,6 @@ class InviteService:
         if not existing:
             db.add(ClassMembership(classroom_id=classroom.id, user_id=user.id, role="student"))
             invite.use_count += 1
-        if not school_ids:
-            db.add(SchoolMembership(school_id=invite.school_id, user_id=user.id, role="student"))
         user.telegram_user_id = telegram_user_id
         user.telegram_chat_id = chat_id
         return classroom

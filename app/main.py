@@ -11,6 +11,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
+from starlette.concurrency import run_in_threadpool
 
 from app.auth.security import SessionManager
 from app.config import get_settings
@@ -28,6 +31,8 @@ from app.telegram.service import TelegramService
 from app.web.router import router as web_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+# HTTP client INFO logs include Telegram's bot token as part of the request URL.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
@@ -56,7 +61,8 @@ def create_app() -> FastAPI:
     telegram_client = TelegramClient(settings)
     app.state.sessions = SessionManager(settings)
     app.state.templates = Jinja2Templates(directory="app/templates")
-    app.state.llm_service = LLMService(provider)
+    app.state.templates.env.filters["local_deadline"] = NotificationService.format_deadline
+    app.state.llm_service = LLMService(provider, settings.llm_confidence_threshold)
     app.state.telegram_client = telegram_client
     app.state.notification_service = NotificationService(telegram_client)
     app.state.telegram_link_service = TelegramLinkService(settings)
@@ -68,7 +74,7 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
-        request_id = request.headers.get("x-request-id", uuid.uuid4().hex[:12])
+        request_id = uuid.uuid4().hex[:12]
         started = time.perf_counter()
         response = await call_next(request)
         response.headers["x-request-id"] = request_id
@@ -89,6 +95,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(AuthorizationError)
     async def authorization_error(_request: Request, _exc: AuthorizationError):
+        logger.info("authorization_denied")
         return JSONResponse(
             status_code=403, content={"detail": "Resource is outside your authorized scope"}
         )
@@ -101,10 +108,20 @@ def create_app() -> FastAPI:
     async def domain_error(_request: Request, exc: DomainError):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
+    @app.exception_handler(IntegrityError)
+    async def integrity_error(_request: Request, _exc: IntegrityError):
+        logger.warning("database_integrity_error")
+        return JSONResponse(status_code=409, content={"detail": "The operation conflicts with a recent change. Reload and retry."})
+
+    @app.exception_handler(OperationalError)
+    async def database_unavailable(_request: Request, _exc: OperationalError):
+        logger.warning("database_operation_failed")
+        return JSONResponse(status_code=503, content={"detail": "Database temporarily unavailable. Please retry."})
+
     @app.get("/health")
     def health():
         with app.state.session_factory() as db:
-            db.execute(__import__("sqlalchemy").text("SELECT 1"))
+            db.execute(text("SELECT 1"))
         return {
             "status": "ok",
             "llm_mode": settings.llm_mode,
@@ -113,11 +130,11 @@ def create_app() -> FastAPI:
 
     @app.post("/telegram/webhook/{secret}")
     async def telegram_webhook(secret: str, request: Request):
-        path_valid = secrets.compare_digest(secret, settings.telegram_webhook_secret)
+        path_valid = secrets.compare_digest(secret.encode(), settings.telegram_webhook_secret.encode())
         header_secret = request.headers.get("x-telegram-bot-api-secret-token")
         header_valid = (
             header_secret is not None
-            and secrets.compare_digest(header_secret, settings.telegram_webhook_secret)
+            and secrets.compare_digest(header_secret.encode(), settings.telegram_webhook_secret.encode())
         )
         if settings.telegram_mode != "real" and header_secret is None:
             header_valid = True
@@ -130,8 +147,11 @@ def create_app() -> FastAPI:
             return {"ok": True, "result": "ignored_malformed_json"}
         if not isinstance(update, dict):
             return {"ok": True, "result": "ignored_malformed_update"}
-        with app.state.session_factory.begin() as db:
-            return app.state.telegram_service.process(db, update)
+        def process_update():
+            with app.state.session_factory.begin() as db:
+                return app.state.telegram_service.process(db, update)
+
+        return await run_in_threadpool(process_update)
 
     return app
 

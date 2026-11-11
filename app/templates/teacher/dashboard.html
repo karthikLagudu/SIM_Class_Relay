@@ -113,6 +113,7 @@
         <textarea name="natural_text" rows="5" placeholder="Complete the climate worksheet and upload a photo by Friday at 6 PM" required></textarea>
       </label>
       <button class="primary">Interpret & assign</button>
+      <button name="draft" value="true">Save as draft</button>
     </form>
   </section>
   <section class="card">
@@ -126,7 +127,7 @@
   <section class="card">
     <p class="eyebrow">OVERVIEW</p>
     <h2>Assignments</h2>
-    <div class="list">{% for a in assignments %}<a href="/teacher/assignments/{{ a.id }}" class="list-row"><div><strong>{{ a.title }}</strong><span>Due {{ a.due_at.strftime('%d %b, %I:%M %p') }} · Class {{ a.classroom_id }}</span></div><b class="badge {{ a.status }}">{{ a.status }}</b></a>{% else %}<p class="empty">Create your first assignment above.</p>{% endfor %}</div>
+    <div class="list">{% for a in assignments %}<a href="/teacher/assignments/{{ a.id }}" class="list-row"><div><strong>{{ a.title }}</strong><span>Due {{ a.due_at|local_deadline(a.timezone) }} · Class {{ a.classroom_id }}</span></div><b class="badge {{ a.status }}">{{ a.status }}</b></a>{% else %}<p class="empty">Create your first assignment above.</p>{% endfor %}</div>
   </section>
   <section class="card">
     <p class="eyebrow">DELIVERY LOG</p>

@@ -31,7 +31,7 @@ from tests.conftest import authenticate
 
 
 def local_noon() -> datetime:
-    return datetime(2026, 9, 3, 6, 30, tzinfo=UTC)
+    return datetime.now(UTC).replace(hour=6, minute=30, second=0, microsecond=0)
 
 
 def add_due_job(db, data, student_key="student1", now=None):
@@ -53,10 +53,10 @@ def add_due_job(db, data, student_key="student1", now=None):
     return row
 
 
-def test_schedule_contains_24h_and_2h_per_student(db, data):
+def test_schedule_contains_pre_deadline_and_overdue_jobs_per_student(db, data):
     rows = ReminderScheduler().schedule_assignment(db, data["assignment"], local_noon())
-    assert len(rows) == 4
-    assert {row.reminder_type for row in rows} == {"deadline_24h", "deadline_2h"}
+    assert len(rows) == 6
+    assert {row.reminder_type for row in rows} == {"deadline_24h", "deadline_2h", "deadline_passed"}
     assert all(f"version:{data['assignment'].schedule_version}" in row.dedupe_key for row in rows)
 
 

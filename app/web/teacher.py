@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
 from app.database import get_db
-from app.exceptions import LLMInterpretationError
+from app.exceptions import LLMInterpretationError, ValidationError
 from app.models import (
     ActivityEvent,
     Assignment,
@@ -213,6 +213,23 @@ def teacher_class(
     )
 
 
+@router.post("/teacher/classes/{class_id}/connect-telegram", response_class=HTMLResponse)
+def connect_teacher_telegram(
+    request: Request,
+    class_id: int,
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    link = request.app.state.telegram_link_service.create_teacher_link(db, user, class_id)
+    db.commit()
+    response = render(request, "teacher/connect_telegram.html", user=user, link=link, class_id=class_id)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 @router.post("/teacher/classes")
 def create_classroom(
     request: Request,
@@ -335,6 +352,7 @@ def create_assignment(
     csrf_token: str = Form(),
     student_ids: list[int] = Form(default=[]),
     targeting_mode: str = Form(default="all"),
+    draft: bool = Form(default=False),
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
@@ -355,6 +373,7 @@ def create_assignment(
             school.timezone,
             idempotency_key,
             student_ids if targeting_mode == "selected" else None,
+            draft=draft,
         )
         db.commit()
         return RedirectResponse(
@@ -363,6 +382,20 @@ def create_assignment(
     except LLMInterpretationError as exc:
         db.commit()
         return RedirectResponse(f"/teacher?message={str(exc).replace(' ', '+')}", status_code=303)
+
+
+@router.post("/teacher/assignments/{assignment_id}/publish")
+def publish_assignment(
+    request: Request,
+    assignment_id: int,
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    request.app.state.assignment_service.publish(db, user, assignment_id)
+    db.commit()
+    return RedirectResponse(f"/teacher/assignments/{assignment_id}?message=Published", status_code=303)
 
 
 @router.get("/teacher/assignments/{assignment_id}", response_class=HTMLResponse)
@@ -437,7 +470,14 @@ def update_deadline(
 ):
     validate_csrf(request, csrf_token)
     assignment = require_teacher_assignment(db, user, assignment_id)
-    local = datetime.fromisoformat(due_at).replace(tzinfo=ZoneInfo(assignment.timezone))
+    try:
+        wall_time = datetime.fromisoformat(due_at)
+    except ValueError as exc:
+        raise ValidationError("Enter a valid local date and time") from exc
+    zone = ZoneInfo(assignment.timezone)
+    local = wall_time.replace(tzinfo=zone)
+    if wall_time.tzinfo is not None or local.utcoffset() != local.replace(fold=1).utcoffset():
+        raise ValidationError("Choose an unambiguous time in the school's timezone")
     request.app.state.assignment_service.update_deadline(
         db, user, assignment_id, local.astimezone(UTC), idempotency_key
     )

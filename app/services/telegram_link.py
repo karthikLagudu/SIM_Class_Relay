@@ -9,7 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.exceptions import AuthorizationError, TelegramLinkError, ValidationError
+from app.exceptions import AuthorizationError, NotFoundError, TelegramLinkError, ValidationError
 from app.models import ClassMembership, Classroom, SchoolMembership, TelegramLinkToken, User
 from app.services.authorization import require_teacher_class
 
@@ -79,6 +79,17 @@ class TelegramLinkService:
         now: datetime | None = None,
     ) -> TelegramConnectionLink:
         _, student = self._student_for_class(db, actor, classroom_id, student_id)
+        return self._create_link(db, actor, student, classroom_id, now)
+
+    def create_teacher_link(
+        self, db: Session, teacher: User, classroom_id: int
+    ) -> TelegramConnectionLink:
+        require_teacher_class(db, teacher, classroom_id)
+        return self._create_link(db, teacher, teacher, classroom_id, None)
+
+    def _create_link(
+        self, db: Session, actor: User, student: User, classroom_id: int, now: datetime | None
+    ) -> TelegramConnectionLink:
         if student.telegram_user_id or student.telegram_chat_id:
             raise ValidationError("Disconnect Telegram before generating a new connection link")
         username = (self.settings.telegram_bot_username or "").strip().lstrip("@")
@@ -140,6 +151,15 @@ class TelegramLinkService:
             raise TelegramLinkError("Telegram account information is invalid.", "invalid")
         student = db.get(User, token.user_id)
         classroom = db.get(Classroom, token.classroom_id)
+        if student and token.created_by_user_id == token.user_id:
+            try:
+                require_teacher_class(db, student, token.classroom_id)
+            except (AuthorizationError, NotFoundError):
+                is_teacher_link = False
+            else:
+                is_teacher_link = True
+        else:
+            is_teacher_link = False
         membership = db.scalar(
             select(ClassMembership.id).where(
                 ClassMembership.classroom_id == token.classroom_id,
@@ -158,7 +178,7 @@ class TelegramLinkService:
             if classroom
             else None
         )
-        if not student or not classroom or not membership or not school_membership:
+        if not student or not classroom or not (is_teacher_link or (membership and school_membership)):
             raise TelegramLinkError("This student can no longer use this connection link.", "invalid")
         other = db.scalar(
             select(User).where(

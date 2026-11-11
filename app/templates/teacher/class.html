@@ -10,6 +10,13 @@
   </div>
 </div>
 
+{% if not user.telegram_user_id %}
+<form method="post" action="/teacher/classes/{{ classroom.id }}/connect-telegram" class="card">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button>Connect my Telegram</button>
+</form>
+{% endif %}
+
 <div class="grid two-one">
   <section class="card create-card">
     <p class="eyebrow">CREATE</p>
@@ -33,6 +40,7 @@
         {% else %}<p class="empty">Add a student before creating work.</p>{% endfor %}
       </fieldset>
       <button class="primary" {% if not students %}disabled{% endif %}>Interpret & assign</button>
+      <button name="draft" value="true" {% if not students %}disabled{% endif %}>Save as draft</button>
     </form>
   </section>
 
@@ -99,7 +107,7 @@
   <section class="card">
     <p class="eyebrow">CLASSWORK</p>
     <h2>Assignments</h2>
-    <div class="list">{% for assignment in assignments %}<a class="list-row" href="/teacher/assignments/{{ assignment.id }}"><div><strong>{{ assignment.title }}</strong><span>Due {{ assignment.due_at.strftime('%d %b, %I:%M %p') }}</span></div><b class="badge {{ assignment.status }}">{{ assignment.status }}</b></a>{% else %}<p class="empty">No assignments for this class yet.</p>{% endfor %}</div>
+    <div class="list">{% for assignment in assignments %}<a class="list-row" href="/teacher/assignments/{{ assignment.id }}"><div><strong>{{ assignment.title }}</strong><span>Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</span></div><b class="badge {{ assignment.status }}">{{ assignment.status }}</b></a>{% else %}<p class="empty">No assignments for this class yet.</p>{% endfor %}</div>
   </section>
   <section class="card">
     <p class="eyebrow">FALLBACK ONBOARDING</p>

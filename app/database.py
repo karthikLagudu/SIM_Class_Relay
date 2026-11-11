@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Generator
 
+from fastapi import Request
 from sqlalchemy import Engine, create_engine, event, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -85,8 +86,17 @@ engine = create_database_engine(get_settings().database_url)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
 
 
-def get_db() -> Generator[Session, None, None]:
-    with SessionLocal() as session:
+def begin_sqlite_write(db: Session) -> None:
+    # Take the writer reservation before reading the rows that decide side effects.
+    connection = db.connection()
+    if connection.dialect.name == "sqlite":
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def get_db(request: Request) -> Generator[Session, None, None]:
+    with request.app.state.session_factory() as session:
+        if request.method == "POST" and request.url.path not in {"/login", "/logout"}:
+            begin_sqlite_write(session)
         yield session
 
 

@@ -9,9 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
-from app.config import get_settings
 from app.database import get_db
-from app.models import Assignment, Feedback, ProgressEvent, StudentAssignmentState, Submission, User
+from app.models import Assignment, Feedback, ProgressEvent, Reminder, StudentAssignmentState, Submission, User
 from app.services.assignment import get_student_state
 from app.services.authorization import require_student_assignment, require_student_submission
 from app.services.progress import ProgressService
@@ -83,6 +82,10 @@ def student_assignment(
             .order_by(Feedback.created_at.desc())
         )
     )
+    reminders = list(db.scalars(select(Reminder).where(
+        Reminder.assignment_id == assignment_id, Reminder.student_id == user.id,
+        Reminder.status.in_(["sent", "skipped", "failed"]),
+    ).order_by(Reminder.scheduled_for.desc())))
     return render(
         request,
         "student/assignment.html",
@@ -90,6 +93,7 @@ def student_assignment(
         assignment=assignment,
         state=state,
         progress=progress,
+        reminders=reminders,
         submissions=submissions,
         feedback=feedback,
         csrf_token=csrf(request),
@@ -128,7 +132,8 @@ async def student_submit(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    settings = get_settings()
+    require_student_assignment(db, user, assignment_id)
+    settings = request.app.state.settings
     content = None
     stored_path = None
     original_name = None
@@ -149,18 +154,24 @@ async def student_submit(
         mime_type = file.content_type
     if not text_content.strip() and content is None:
         raise HTTPException(422, "Provide text or a file")
-    submission = SubmissionService().submit(
-        db,
-        user,
-        assignment_id,
-        idempotency_key,
-        text_content=(text_content.strip() or None) if content is None else None,
-        stored_file_path=stored_path,
-        original_filename=original_name,
-        mime_type=mime_type,
-        content=content,
-    )
-    db.commit()
+    keep_file = False
+    try:
+        submission = SubmissionService().submit(
+            db,
+            user,
+            assignment_id,
+            idempotency_key,
+            text_content=(text_content.strip() or None) if content is None else None,
+            stored_file_path=stored_path,
+            original_filename=original_name,
+            mime_type=mime_type,
+            content=content,
+        )
+        db.commit()
+        keep_file = submission.stored_file_path == stored_path
+    finally:
+        if stored_path and not keep_file:
+            Path(stored_path).unlink(missing_ok=True)
     return RedirectResponse(
         f"/student/assignments/{assignment_id}?message=Submission+{submission.id}+received",
         status_code=303,

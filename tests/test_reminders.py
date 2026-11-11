@@ -65,5 +65,5 @@ def test_deadline_update_cancels_and_reschedules_pending_reminders(db, data):
             )
         )
     )
-    assert len(pending) == 4
+    assert len(pending) == 6
     assert all(item.dedupe_key != "old-reminder" for item in pending)

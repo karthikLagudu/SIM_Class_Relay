@@ -5,17 +5,21 @@ import shlex
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
-from app.exceptions import DomainError, TelegramLinkError
+from app.exceptions import DomainError, InviteError, TelegramLinkError
 from app.llm.service import LLMService
 from app.models import (
     Assignment,
     ProcessedTelegramUpdate,
+    Reminder,
+    School,
     StudentAssignmentState,
     User,
 )
 from app.services.assignment import AssignmentService
+from app.services.authorization import require_student_assignment, require_teacher_class
 from app.services.invite import InviteService
 from app.services.notification import NotificationService
 from app.services.progress import ProgressService
@@ -28,10 +32,10 @@ from app.telegram.router import TelegramIntentRouter
 logger = logging.getLogger(__name__)
 HELP = (
     "Connect with the secure link provided by Classroom Companion or your teacher.\n"
-    "Fallback: /join CODE EMAIL - link a pre-created student account\n\nCommands:\n"
+    "/join CODE - join a class from a linked student account\n\nCommands:\n"
     "/assign CLASS_ID instructions and deadline - teacher creates work\n"
-    "/ack ASSIGNMENT_ID\n/progress ASSIGNMENT_ID update\n/blocked ASSIGNMENT_ID reason\n"
-    "/submit ASSIGNMENT_ID text (or attach a file with this caption)\n/status"
+    "/ack ASSIGNMENT_ID\n/progress ASSIGNMENT_ID 50 (or a written update)\n/blocked ASSIGNMENT_ID reason\n"
+    "/submit ASSIGNMENT_ID text (or attach a file with this caption)\n/status\n/classes\n/reminders"
 )
 
 
@@ -49,35 +53,51 @@ class TelegramService:
         self.intent_router = TelegramIntentRouter(llm, client, self.notifications)
 
     def process(self, db: Session, update: dict) -> dict[str, str | bool]:
-        try:
-            update_id = int(update.get("update_id", -1))
-        except (TypeError, ValueError):
-            update_id = -1
-        if update_id < 0:
+        update_id = update.get("update_id")
+        if type(update_id) is not int or not 0 <= update_id <= 2**63 - 1:
             return {"ok": True, "result": "ignored_missing_update_id"}
-        if db.get(ProcessedTelegramUpdate, update_id):
+        claimed = db.execute(
+            insert(ProcessedTelegramUpdate)
+            .values(telegram_update_id=update_id, result_reference="ignored")
+            .on_conflict_do_nothing(index_elements=["telegram_update_id"])
+        )
+        if not claimed.rowcount:
+            logger.info("duplicate_update_ignored update_id=%s", update_id)
             return {"ok": True, "duplicate": True}
-        message = update.get("message") or update.get("edited_message")
+        record = db.get(ProcessedTelegramUpdate, update_id)
+        message = update.get("message")
         callback = update.get("callback_query")
-        if callback:
-            message = callback.get("message", {})
-            message["from"] = callback.get("from", {})
-            action, _, value = callback.get("data", "").partition(":")
-            if action in {"ack", "blocked"}:
+        if isinstance(callback, dict):
+            callback_message = callback.get("message")
+            data = callback.get("data")
+            if not isinstance(callback_message, dict) or not isinstance(data, str):
+                return {"ok": True, "result": "ignored"}
+            message = {**callback_message, "from": callback.get("from")}
+            action, _, value = data.partition(":")
+            if action in {"ack", "blocked", "submit"}:
                 message["text"] = f"/{action} {value}"
             elif action == "help":
                 message["text"] = f"/blocked {value} I need help"
             else:
                 message["text"] = "/help"
-        if not message:
-            db.add(
-                ProcessedTelegramUpdate(telegram_update_id=update_id, result_reference="ignored")
-            )
+        if not isinstance(message, dict):
             return {"ok": True, "result": "ignored"}
-        sender = message.get("from", {})
+        sender, chat = message.get("from"), message.get("chat")
+        if not isinstance(sender, dict) or not isinstance(chat, dict):
+            return {"ok": True, "result": "ignored"}
         telegram_user_id = str(sender.get("id", ""))
-        chat_id = str(message.get("chat", {}).get("id", telegram_user_id))
-        text = (message.get("text") or message.get("caption") or "").strip()
+        chat_id = str(chat.get("id", ""))
+        if chat.get("type", "private") != "private" or not chat_id.isdigit() or chat_id != telegram_user_id:
+            return {"ok": True, "result": "ignored_non_private"}
+        raw_text = message.get("text") or message.get("caption") or ""
+        if not isinstance(raw_text, str):
+            return {"ok": True, "result": "ignored"}
+        text = raw_text.strip()
+        document, photos = message.get("document"), message.get("photo", [])
+        if (document is not None and not isinstance(document, dict)) or (
+            not isinstance(photos, list) or any(not isinstance(photo, dict) for photo in photos)
+        ):
+            return {"ok": True, "result": "ignored"}
         user = db.scalar(select(User).where(User.telegram_user_id == telegram_user_id))
         try:
             result = self._dispatch(db, user, telegram_user_id, chat_id, text, message, update_id)
@@ -93,7 +113,7 @@ class TelegramService:
                 kind="error",
             )
             result = "error:invalid_command_format"
-        db.add(ProcessedTelegramUpdate(telegram_update_id=update_id, result_reference=result))
+        record.result_reference = result
         logger.info("telegram_update_processed update_id=%s result=%s", update_id, result)
         return {"ok": True, "result": result}
 
@@ -187,29 +207,13 @@ class TelegramService:
             )
             return f"telegram_link:connected:{target.id}"
         if command == "/join":
-            if len(parts) != 3:
-                self.client.send(
-                    db, user, chat_id, "Use /join CODE your@email.example", kind="help"
-                )
-                return "join_help"
-            target = db.scalar(select(User).where(User.email == parts[2].lower()))
-            if not target:
-                from app.exceptions import InviteError
-
-                raise InviteError("The invite details could not be verified")
-            classroom = self.invites.join(db, target, parts[1], telegram_user_id, chat_id)
-            self.client.send(
-                db, target, chat_id, f"Linked as {target.name} to {classroom.name}.", kind="joined"
-            )
+            if not user or len(parts) != 2:
+                raise InviteError("Connect your student account using its private link, then send /join CODE.")
+            classroom = self.invites.join(db, user, parts[1], telegram_user_id, chat_id)
+            self.client.send(db, user, chat_id, f"You are in {classroom.name}.", kind="joined")
             return f"joined:{classroom.id}"
         if not user:
-            self.client.send(
-                db,
-                None,
-                chat_id,
-                "Your Telegram account is not linked. Use /join CODE EMAIL.\n\n" + HELP,
-                kind="help",
-            )
+            self.client.send(db, None, chat_id, HELP, kind="help")
             return "unlinked"
         if not user.telegram_chat_id:
             user.telegram_chat_id = chat_id
@@ -224,19 +228,9 @@ class TelegramService:
                 return "assign_help"
             class_id = int(parts[1])
             natural_text = " ".join(parts[2:])
-            classroom = __import__(
-                "app.services.authorization", fromlist=["require_teacher_class"]
-            ).require_teacher_class(db, user, class_id)
-            parsed = self.llm.assignment(
-                db,
-                user.id,
-                natural_text,
-                classroom
-                and db.get(
-                    __import__("app.models", fromlist=["School"]).School, classroom.school_id
-                ).timezone,
-                datetime.now(UTC),
-            )
+            classroom = require_teacher_class(db, user, class_id)
+            school = db.get(School, classroom.school_id)
+            parsed = self.llm.assignment(db, user.id, natural_text, school.timezone, datetime.now(UTC))
             assignment = self.assignments.create(
                 db,
                 user,
@@ -244,9 +238,7 @@ class TelegramService:
                 parsed.title,
                 parsed.instructions,
                 parsed.due_at,
-                db.get(
-                    __import__("app.models", fromlist=["School"]).School, classroom.school_id
-                ).timezone,
+                school.timezone,
                 f"telegram:{update_id}:assignment",
             )
             self.client.send(
@@ -266,9 +258,14 @@ class TelegramService:
             ]
             body = " ".join(parts[2:]) or status.replace("_", " ")
             percent = None
-            if command == "/progress":
-                interpreted = self.llm.progress(db, user.id, body)
-                status, percent = interpreted.status, interpreted.progress_percent
+            if command == "/progress" and parts[2:]:
+                if len(parts) == 3 and parts[2].isascii() and parts[2].isdigit():
+                    percent = int(parts[2])
+                    if not 0 <= percent <= 100:
+                        raise ValueError("Percentage must be 0 to 100")
+                else:
+                    interpreted = self.llm.progress(db, user.id, body)
+                    status, percent = interpreted.status, interpreted.progress_percent
             self.progress.update(db, user, assignment_id, status, body, percent)
             self.client.send(
                 db,
@@ -282,11 +279,16 @@ class TelegramService:
             if len(parts) < 2:
                 return "missing_assignment_id"
             assignment_id = int(parts[1])
+            require_student_assignment(db, user, assignment_id)
             document = message.get("document")
             photos = message.get("photo") or []
             photo = photos[-1] if photos else None
             file_data = document or photo
             body = " ".join(parts[2:]) or None
+            if not body and not file_data:
+                self.intent_router.context.set(db, user, chat_id, assignment_id=assignment_id, pending_action="submission")
+                self.client.send(db, user, chat_id, f"Send a photo or file, or type /submit {assignment_id} followed by your answer.", kind="submission_prompt")
+                return f"pending_submission:{assignment_id}"
             stored_path = None
             original_filename = None
             mime_type = None
@@ -317,6 +319,27 @@ class TelegramService:
                 db, user, chat_id, f"Submission #{submission.id} received.", kind="submission"
             )
             return f"submission:{submission.id}"
+        if command in {"/classes", "/reminders", "/status"}:
+            classes = self.intent_router.teacher_classes(db, user)
+            if command == "/classes":
+                body = "\n".join(f"#{item.id} {item.name}" for item in classes)
+                self.client.send(db, user, chat_id, body or "No teaching classes.", kind="classes")
+                return "classes"
+            if command == "/reminders":
+                rows = db.execute(
+                    select(Assignment.title, Reminder.status, Reminder.scheduled_for, Assignment.timezone)
+                    .join(Assignment, Assignment.id == Reminder.assignment_id)
+                    .where(Assignment.classroom_id.in_([item.id for item in classes]))
+                    .order_by(Reminder.scheduled_for.desc()).limit(12)
+                )
+                body = "\n".join(
+                    f"{title}: {status} · {self.notifications.format_deadline(due, tz)}"
+                    for title, status, due, tz in rows
+                )
+                self.client.send(db, user, chat_id, body or "No teaching reminders.", kind="reminders")
+                return "reminders"
+            if classes:
+                return self.intent_router.send_risk_summary(db, user, chat_id)
         if command == "/status":
             rows = db.execute(
                 select(Assignment, StudentAssignmentState)
@@ -324,7 +347,7 @@ class TelegramService:
                 .where(StudentAssignmentState.student_id == user.id)
             ).all()
             summary = (
-                "\n".join(f"#{a.id} {a.title}: {s.status}, due {a.due_at}" for a, s in rows)
+                "\n".join(f"#{a.id} {a.title}: {s.status}, due {self.notifications.format_deadline(a.due_at, a.timezone)}" for a, s in rows)
                 or "No assignments."
             )
             self.client.send(db, user, chat_id, summary, kind="status")

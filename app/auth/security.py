@@ -87,5 +87,5 @@ def current_user(request: Request, db: Session) -> User:
 
 def validate_csrf(request: Request, supplied: str) -> None:
     data = current_session(request)
-    if not supplied or not secrets.compare_digest(data.csrf_token, supplied):
+    if not supplied or not secrets.compare_digest(data.csrf_token.encode(), supplied.encode()):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token")

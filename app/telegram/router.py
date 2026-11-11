@@ -39,7 +39,7 @@ class TelegramIntentRouter:
         self.context = ConversationService(client.settings.conversation_context_minutes)
         self.files = TelegramFileService(client.settings, client)
 
-    def _teacher_classes(self, db: Session, user: User) -> list[Classroom]:
+    def teacher_classes(self, db: Session, user: User) -> list[Classroom]:
         coordinator_schools = select(SchoolMembership.school_id).where(
             SchoolMembership.user_id == user.id,
             SchoolMembership.role == "coordinator",
@@ -64,6 +64,8 @@ class TelegramIntentRouter:
     ) -> Classroom:
         if reference:
             clean = normalize(reference)
+            if not clean:
+                raise AmbiguousReferenceError("Please give the class name.")
             matches = [
                 item
                 for item in classes
@@ -79,6 +81,24 @@ class TelegramIntentRouter:
             raise AmbiguousReferenceError(f"Which class do you mean? {choices}")
         return matches[0]
 
+    def _student_targets(self, db: Session, class_id: int, references: list[str]) -> list[int] | None:
+        if not references:
+            return None
+        students = list(db.scalars(
+            select(User).join(ClassMembership, ClassMembership.user_id == User.id).where(
+                ClassMembership.classroom_id == class_id, ClassMembership.role == "student"
+            )
+        ))
+        targets = []
+        for reference in references:
+            matches = [student.id for student in students if reference.strip().casefold() in {
+                student.name.casefold(), student.email.casefold()
+            }]
+            if len(matches) != 1:
+                raise AmbiguousReferenceError("Give the full name or email of each intended student in this class.")
+            targets.append(matches[0])
+        return targets
+
     def route(
         self,
         db: Session,
@@ -88,7 +108,7 @@ class TelegramIntentRouter:
         message: dict,
         update_id: int,
     ) -> str:
-        classes = self._teacher_classes(db, user)
+        classes = self.teacher_classes(db, user)
         if classes:
             return self._teacher(db, user, chat_id, text, update_id, classes)
         return self._student(db, user, chat_id, text, message, update_id)
@@ -104,11 +124,16 @@ class TelegramIntentRouter:
     ) -> str:
         context = self.context.get(db, user, chat_id)
         school = db.get(School, classes[0].school_id)
-        parsed = self.llm.teacher_intent(db, user.id, text, school.timezone, datetime.now(UTC))
+        now = datetime.now(UTC)
+        timezone_name = school.timezone
+        parsed = self.llm.teacher_intent(db, user.id, text, timezone_name, now)
         if parsed.intent == "create_assignment":
             classroom = self._resolve_class(classes, parsed.class_reference)
             school = db.get(School, classroom.school_id)
-            if not parsed.title or not parsed.instructions or not parsed.due_at:
+            due_at = parsed.due_at
+            if school.timezone != timezone_name:
+                due_at = self.llm.assignment(db, user.id, text, school.timezone, now).due_at
+            if not parsed.title or not parsed.instructions or not due_at:
                 raise LLMInterpretationError("What should students do, and when is it due?")
             assignment = self.assignments.create(
                 db,
@@ -116,9 +141,10 @@ class TelegramIntentRouter:
                 classroom.id,
                 parsed.title,
                 parsed.instructions,
-                parsed.due_at,
+                due_at,
                 school.timezone,
                 f"telegram:{update_id}:assignment",
+                student_ids=self._student_targets(db, classroom.id, parsed.student_targets),
             )
             self.context.set(db, user, chat_id, assignment_id=assignment.id)
             self.client.send(
@@ -135,6 +161,7 @@ class TelegramIntentRouter:
             return f"assignment:{assignment.id}"
         reference = parsed.assignment_reference
         if reference and normalize(reference) in {
+            "it",
             "assignment",
             "the assignment",
             "science assignment",
@@ -153,13 +180,17 @@ class TelegramIntentRouter:
                 raise AmbiguousReferenceError("Which assignment do you mean?")
             assignment = self.references.resolve_for_teacher(db, user, reference)
             if parsed.intent == "update_assignment_deadline":
-                if not parsed.due_at:
+                due_at = parsed.due_at
+                if assignment.timezone != timezone_name:
+                    corrected = self.llm.teacher_intent(db, user.id, text, assignment.timezone, now)
+                    due_at = corrected.due_at if corrected.intent == parsed.intent else None
+                if not due_at:
                     raise LLMInterpretationError("What is the new deadline?")
                 self.assignments.update_deadline(
                     db,
                     user,
                     assignment.id,
-                    parsed.due_at,
+                    due_at,
                     f"telegram:{update_id}:deadline",
                 )
                 response = f"Moved #{assignment.id} to {assignment.due_at}."
@@ -183,16 +214,22 @@ class TelegramIntentRouter:
             self.client.send(db, user, chat_id, response, kind="teacher_confirmation")
             return f"{parsed.intent}:{assignment.id}"
         if parsed.intent in {"risk_summary", "class_status"}:
-            risks = self.risks.for_actor(db, user)
-            facts = [
-                f"{item.student_name}: {item.assignment_title}; {', '.join(item.reasons)}; risk {item.risk_score}/100."
-                for item in risks
-            ]
-            summary = self.llm.risk_summary(db, user.id, facts)
-            self.client.send(db, user, chat_id, summary, kind="risk_summary")
-            return "risk_summary"
+            classroom = self._resolve_class(classes, parsed.class_reference) if parsed.class_reference else None
+            return self.send_risk_summary(db, user, chat_id, classroom_id=classroom.id if classroom else None)
         self.client.send(db, user, chat_id, "Tell me what to assign, change, cancel, or review.", kind="help")
         return "teacher_help"
+
+    def send_risk_summary(
+        self, db: Session, user: User, chat_id: str, *, classroom_id: int | None = None
+    ) -> str:
+        risks = self.risks.for_actor(db, user, classroom_id=classroom_id)
+        facts = [
+            f"{item.student_name}: {item.assignment_title}; {', '.join(item.reasons)}; risk {item.risk_score}/100."
+            for item in risks[:25]
+        ]
+        summary = self.llm.risk_summary(db, user.id, facts)
+        self.client.send(db, user, chat_id, summary, kind="risk_summary")
+        return "risk_summary"
 
     def _active_assignments(self, db: Session, user: User) -> list[Assignment]:
         from app.models import AssignmentTarget, StudentAssignmentState
