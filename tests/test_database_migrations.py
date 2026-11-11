@@ -13,7 +13,7 @@ def test_init_db_upgrades_legacy_sqlite_schema_without_losing_rows(tmp_path) -> 
         )
         connection.exec_driver_sql("CREATE TABLE feedback (id INTEGER PRIMARY KEY)")
         connection.exec_driver_sql(
-            "CREATE TABLE notification_deliveries (id INTEGER PRIMARY KEY)"
+            "CREATE TABLE notification_deliveries (id INTEGER PRIMARY KEY, status VARCHAR(20))"
         )
         connection.exec_driver_sql("CREATE TABLE reminders (id INTEGER PRIMARY KEY)")
         connection.exec_driver_sql(
@@ -38,6 +38,7 @@ def test_init_db_upgrades_legacy_sqlite_schema_without_losing_rows(tmp_path) -> 
         "attempt_count",
         "last_attempt_at",
         "next_attempt_at",
+        "reply_markup",
     }.issubset(
         {column["name"] for column in schema.get_columns("notification_deliveries")}
     )

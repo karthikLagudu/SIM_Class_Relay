@@ -30,6 +30,7 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "idempotency_key": "VARCHAR(180)",
         "attempt_count": "INTEGER NOT NULL DEFAULT 0",
         "last_attempt_at": "DATETIME",
+        "reply_markup": "JSON",
         "next_attempt_at": "DATETIME",
     },
     "reminders": {
@@ -39,6 +40,10 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
 }
 
 _SQLITE_ADDITIVE_INDEXES = (
+    (
+        "CREATE INDEX IF NOT EXISTS ix_notification_deliveries_due "
+        "ON notification_deliveries (status, next_attempt_at)"
+    ),
     (
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_feedback_idempotency_key "
         "ON feedback (idempotency_key)"

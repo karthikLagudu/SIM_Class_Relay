@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 
 from app.models import Assignment, NotificationDelivery, Reminder, Submission
 from app.services.assignment import AssignmentService, get_student_state
+from app.services.delivery import DeliveryProcessor
 from app.services.overdue import OverdueService
 from app.services.submission import SubmissionService
 from tests.conftest import authenticate
@@ -144,7 +145,7 @@ def test_incomplete_attachment_is_ignored(app, db, data):
 def test_log_mode_never_retries_live_deliveries(app, db, data, monkeypatch):
     client = app.state.telegram_client
     client.settings.telegram_bot_token = "test-token-retained-in-log-mode"
-    monkeypatch.setattr(client, "_attempt_send", lambda *_: None)
+    monkeypatch.setattr(client, "send_message", lambda *_: None)
     delivery = NotificationDelivery(
         user_id=data["student1"].id,
         chat_id=data["student1"].telegram_chat_id,
@@ -156,5 +157,6 @@ def test_log_mode_never_retries_live_deliveries(app, db, data, monkeypatch):
     )
     db.add(delivery)
     db.flush()
-    assert client.retry_due(db) == []
+    db.commit()
+    assert DeliveryProcessor(client, app.state.session_factory).run() == []
     assert delivery.attempt_count == 1

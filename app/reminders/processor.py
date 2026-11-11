@@ -55,6 +55,7 @@ class ReminderProcessor:
             .join(School, School.id == Assignment.school_id)
             .where(
                 Reminder.status.in_(["pending", "deferred"]),
+                Reminder.processed_at.is_(None),
                 or_(
                     Reminder.scheduled_for <= now,
                     Assignment.status == "cancelled",
@@ -106,7 +107,8 @@ class ReminderProcessor:
             duplicate = select(Reminder.id).where(
                 Reminder.assignment_id == assignment.id,
                 Reminder.student_id == student.id,
-                Reminder.status.in_(["sent", "skipped", "failed"]),
+                Reminder.status.in_(["pending", "sent", "skipped", "failed"]),
+                Reminder.processed_at.is_not(None),
             )
             if decision.reminder_type == "overdue":
                 duplicate = duplicate.where(
@@ -120,7 +122,7 @@ class ReminderProcessor:
                 )
             else:
                 duplicate = duplicate.where(
-                    Reminder.reminder_type.in_(["silent_due_soon", "gentle_due_soon", "due_within_2h"]),
+                    Reminder.reminder_type.in_(["silent_due_soon", "gentle_due_soon", "due_within_2h", "revision_due_soon"]),
                     Reminder.processed_at >= now - timedelta(hours=1),
                 )
             if db.scalar(duplicate.limit(1)):
@@ -160,6 +162,8 @@ class ReminderProcessor:
                     body = f"Need a hand with {assignment.title}? Reply with the part that's holding you up."
                 elif decision.reminder_type == "overdue":
                     body = f"{assignment.title} was due {facts['due']}. You can still submit or ask for help."
+                elif decision.reminder_type == "revision_due_soon":
+                    body = f"Your teacher requested a revision for {assignment.title}. Review the feedback and resubmit by {facts['due']}."
                 elif decision.reminder_type == "silent_due_soon":
                     body = f"Have you seen {assignment.title}? It's due {facts['due']}. Reply to acknowledge it."
                 else:

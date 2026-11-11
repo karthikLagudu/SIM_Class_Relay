@@ -14,6 +14,7 @@ from app.models import (
     SchoolMembership,
     TelegramLinkToken,
 )
+from app.services.delivery import DeliveryProcessor
 from app.services.telegram_link import TelegramLinkService
 from tests.conftest import authenticate
 
@@ -435,6 +436,10 @@ def test_notification_failure_does_not_rollback_assignment(app, db, data, monkey
             )
         )
         assert assignment.id is not None
+        assert delivery.status == "pending"
+        db.commit()
+        assert DeliveryProcessor(telegram, app.state.session_factory).run() == [delivery.id]
+        db.refresh(delivery)
         assert delivery.status == "failed"
         assert delivery.next_attempt_at is not None
         assert "test-token-must-stay-secret" not in (delivery.error or "")
@@ -482,8 +487,10 @@ def test_failed_delivery_is_retried_with_mocked_telegram(app, db, data, monkeypa
         monkeypatch.setattr(
             telegram.http, "post", lambda *_args, **_kwargs: SuccessfulResponse()
         )
-        retried = telegram.retry_due(db)
-        assert retried == [delivery]
+        db.commit()
+        retried = DeliveryProcessor(telegram, app.state.session_factory).run()
+        assert retried == [delivery.id]
+        db.refresh(delivery)
         assert delivery.status == "sent"
         assert delivery.attempt_count == 2
         assert delivery.external_message_id == "456"

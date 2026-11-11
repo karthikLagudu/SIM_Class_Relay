@@ -298,6 +298,7 @@ class NotificationDelivery(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key"),
         CheckConstraint("status IN ('pending','sent','logged','skipped','failed')"),
+        Index("ix_notification_deliveries_due", "status", "next_attempt_at"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
@@ -314,6 +315,7 @@ class NotificationDelivery(Base):
     kind: Mapped[str] = mapped_column(String(40))
     body: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20))
+    reply_markup: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     external_message_id: Mapped[str | None] = mapped_column(String(80))
     error: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String(180), nullable=True)

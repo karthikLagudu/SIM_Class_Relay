@@ -24,6 +24,7 @@ from app.reminders.policy import next_permitted_time
 from app.reminders.scheduler import ReminderScheduler
 from app.services.assignment import get_student_state
 from app.services.classroom import ClassroomService
+from app.services.delivery import DeliveryProcessor
 from app.services.invite import InviteService
 from app.services.submission import FeedbackService, SubmissionService
 from app.telegram.conversation import ConversationService
@@ -398,8 +399,12 @@ def test_telegram_failure_is_persisted_without_rolling_back(app, db, data):
             assignment_id=data["assignment"].id,
             idempotency_key="failure-evidence",
         )
+        assert delivery.status == "pending"
+        db.commit()
+        DeliveryProcessor(client, app.state.session_factory).run()
+        db.refresh(delivery)
         assert delivery.status == "failed"
-        assert delivery.error == "TELEGRAM_BOT_TOKEN is not configured"
+        assert "configured bot token" in delivery.error
     finally:
         client.settings.telegram_mode = previous_mode
         client.settings.telegram_bot_token = previous_token

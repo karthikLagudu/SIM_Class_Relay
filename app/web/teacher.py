@@ -546,7 +546,7 @@ def create_feedback(
     )
     db.commit()
     return RedirectResponse(
-        f"/teacher/assignments/{feedback.assignment_id}?message=Feedback+sent", status_code=303
+        f"/teacher/assignments/{feedback.assignment_id}?message=Feedback+saved", status_code=303
     )
 
 
