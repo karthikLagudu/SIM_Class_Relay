@@ -26,7 +26,7 @@ DEADLINE_RULES = (
 
 class OpenAIProvider(LLMProvider):
     def __init__(self, api_key: str, model: str):
-        self.client = OpenAI(api_key=api_key, timeout=20, max_retries=2)
+        self.client = OpenAI(api_key=api_key, timeout=12, max_retries=0)
         self.model = model
 
     def _structured(self, system: str, user: str, schema: type):
@@ -73,7 +73,7 @@ class OpenAIProvider(LLMProvider):
 
     def interpret_student(self, text: str) -> StudentIntent:
         return self._structured(
-            "Classify a student's informal classroom message. Preserve blocker meaning and extract progress percentage. Use submit_text only when work content is actually supplied or the student clearly announces an imminent attachment. Never choose a database ID.",
+            "Classify a student's informal classroom message. Preserve blocker meaning and extract progress percentage. Use submit_text only when the actual work is supplied and copy the submitted work verbatim into message. Use submit_attachment for announcements such as Here is my homework when no work is included. For I am done without work, report progress at 100 percent. Never choose a database ID.",
             text,
             StudentIntent,
         )

@@ -95,17 +95,6 @@ class NotificationService:
                 f"assignment-created:{assignment.id}:{student.id}",
                 buttons=True,
             ))
-            if student.telegram_chat_id:
-                from app.telegram.conversation import ConversationService
-
-                ConversationService(
-                    self.telegram.settings.conversation_context_minutes
-                ).set(
-                    db,
-                    student,
-                    student.telegram_chat_id,
-                    assignment_id=assignment.id,
-                )
         return deliveries
 
     def notify_deadline_changed(

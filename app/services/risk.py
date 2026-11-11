@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Assignment, ClassMembership, SchoolMembership, StudentAssignmentState, User
+from app.models import Assignment, ClassMembership, StudentAssignmentState, User
+from app.services.authorization import teacher_class_scope
 
 
 @dataclass(frozen=True)
@@ -20,31 +21,37 @@ class RiskItem:
     reasons: tuple[str, ...]
     deadline: datetime
     last_activity: datetime | None
+    state: str
+
+    def summary_fact(self) -> str:
+        last = self.last_activity.isoformat() if self.last_activity else "none"
+        return (
+            f"{self.student_name}: {self.assignment_title}; state {self.state}; "
+            f"{', '.join(self.reasons)}; due {self.deadline.isoformat()}; last activity {last}; "
+            f"risk {self.risk_score}/100."
+        )
 
 
 class RiskService:
     def for_actor(
-        self, db: Session, actor: User, now: datetime | None = None, *, classroom_id: int | None = None
+        self,
+        db: Session,
+        actor: User,
+        now: datetime | None = None,
+        *,
+        classroom_id: int | None = None,
     ) -> list[RiskItem]:
         now = now or datetime.now(UTC)
-        coordinator_schools = select(SchoolMembership.school_id).where(
-            SchoolMembership.user_id == actor.id,
-            SchoolMembership.role == "coordinator",
-        )
-        teacher_classes = select(ClassMembership.classroom_id).where(
-            ClassMembership.user_id == actor.id,
-            ClassMembership.role == "teacher",
-        )
         query = (
             select(StudentAssignmentState, User, Assignment)
             .join(User, User.id == StudentAssignmentState.student_id)
             .join(Assignment, Assignment.id == StudentAssignmentState.assignment_id)
+            .join(ClassMembership, ClassMembership.classroom_id == Assignment.classroom_id)
             .where(
                 Assignment.status == "assigned",
-                or_(
-                    Assignment.school_id.in_(coordinator_schools),
-                    Assignment.classroom_id.in_(teacher_classes),
-                ),
+                Assignment.classroom_id.in_(teacher_class_scope(actor.id)),
+                ClassMembership.user_id == StudentAssignmentState.student_id,
+                ClassMembership.role == "student",
             )
         )
         if classroom_id is not None:
@@ -70,8 +77,9 @@ class RiskService:
                 score += 30
                 reasons.append("due within 24 hours")
             if state.last_activity_at is None:
-                score += 25
-                reasons.append("no acknowledgement")
+                if due <= now + timedelta(hours=24):
+                    score += 25
+                    reasons.append("no acknowledgement or activity")
             else:
                 last = state.last_activity_at.replace(tzinfo=state.last_activity_at.tzinfo or UTC)
                 if last < now - timedelta(days=2):
@@ -93,7 +101,8 @@ class RiskService:
                     risk_level=level,
                     reasons=tuple(reasons),
                     deadline=due,
-                    last_activity=state.last_activity_at,
+                    last_activity=(last if state.last_activity_at is not None else None),
+                    state=state.status,
                 )
             )
         return sorted(result, key=lambda item: (-item.risk_score, item.student_name))

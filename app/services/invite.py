@@ -20,8 +20,6 @@ class InviteService:
         expires = invite.expires_at
         if expires and expires.replace(tzinfo=expires.tzinfo or UTC) < now:
             raise InviteError("Invite code has expired")
-        if invite.max_uses is not None and invite.use_count >= invite.max_uses:
-            raise InviteError("Invite code has reached its use limit")
         classroom = db.get(Classroom, invite.classroom_id)
         if not classroom or classroom.school_id != invite.school_id:
             raise InviteError("Invite context is invalid")
@@ -49,6 +47,8 @@ class InviteService:
             )
         )
         if not existing:
+            if invite.max_uses is not None and invite.use_count >= invite.max_uses:
+                raise InviteError("Invite code has reached its use limit")
             db.add(ClassMembership(classroom_id=classroom.id, user_id=user.id, role="student"))
             invite.use_count += 1
         user.telegram_user_id = telegram_user_id

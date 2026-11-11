@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
@@ -27,6 +27,7 @@ from app.models import (
     User,
 )
 from app.services.authorization import (
+    list_teacher_classes,
     require_teacher_assignment,
     require_teacher_class,
 )
@@ -34,7 +35,8 @@ from app.services.classroom import ClassroomService
 from app.services.risk import RiskService
 from app.services.submission import FeedbackService
 from app.services.telegram_link import TelegramConnectionLink
-from app.web.helpers import csrf, operation_key, render, teacher_classes, web_user
+from app.web.files import INLINE_IMAGE_TYPES
+from app.web.helpers import csrf, operation_key, render, web_user
 
 router = APIRouter()
 
@@ -112,7 +114,7 @@ def _render_class_page(
 def teacher_dashboard(
     request: Request, user: User = Depends(web_user), db: Session = Depends(get_db)
 ):
-    classes = teacher_classes(db, user)
+    classes = list_teacher_classes(db, user)
     if not classes:
         raise HTTPException(403, "Teacher or coordinator access required")
     class_ids = [item.id for item in classes]
@@ -150,12 +152,10 @@ def teacher_dashboard(
         )
     )
     risks = RiskService().for_actor(db, user)
-    risk_facts = [
-        f"{item.student_name} needs attention on {item.assignment_title}: {', '.join(item.reasons)}."
-        for item in risks
-    ]
-    risk_summary = request.app.state.llm_service.risk_summary(db, user.id, risk_facts)
-    db.commit()
+    risk_summary = (
+        f"{len({item.student_id for item in risks})} students need attention across {len({item.assignment_id for item in risks})} assignments."
+        if risks else "No students currently need attention."
+    )
     activity = list(
         db.scalars(
             select(ActivityEvent)
@@ -167,12 +167,23 @@ def teacher_dashboard(
     deliveries = list(
         db.scalars(
             select(NotificationDelivery)
-            .where(
-                or_(
+            .outerjoin(Assignment, Assignment.id == NotificationDelivery.assignment_id)
+            .where(or_(
+                and_(
+                    Assignment.classroom_id.in_(class_ids),
+                    NotificationDelivery.classroom_id == Assignment.classroom_id,
+                    NotificationDelivery.school_id == Assignment.school_id,
+                ),
+                and_(
+                    NotificationDelivery.assignment_id.is_(None),
                     NotificationDelivery.classroom_id.in_(class_ids),
+                ),
+                and_(
+                    NotificationDelivery.assignment_id.is_(None),
+                    NotificationDelivery.classroom_id.is_(None),
                     NotificationDelivery.school_id.in_(coordinator_school_ids),
-                )
-            )
+                ),
+            ))
             .order_by(NotificationDelivery.created_at.desc())
             .limit(10)
         )
@@ -187,6 +198,7 @@ def teacher_dashboard(
         coordinator_schools=coordinator_schools,
         coordinator_classes=coordinator_classes,
         assignments=assignments,
+        active_count=sum(item.status == "assigned" for item in assignments),
         risks=risks,
         risk_summary=risk_summary,
         activity=activity,
@@ -435,10 +447,18 @@ def teacher_assignment(
     deliveries = list(
         db.scalars(
             select(NotificationDelivery)
-            .where(NotificationDelivery.assignment_id == assignment_id)
+            .where(
+                NotificationDelivery.assignment_id == assignment_id,
+                NotificationDelivery.classroom_id == assignment.classroom_id,
+                NotificationDelivery.school_id == assignment.school_id,
+            )
             .order_by(NotificationDelivery.created_at.desc())
         )
     )
+    latest = {}
+    for submission in submissions:
+        latest.setdefault(submission.student_id, submission.id)
+    reviewable = {latest[state.student_id] for state, _ in rows if state.status == "submitted" and state.student_id in latest}
     return render(
         request,
         "teacher/assignment.html",
@@ -447,6 +467,8 @@ def teacher_assignment(
         state_rows=rows,
         submissions=submissions,
         feedback=feedback,
+        reviewable=reviewable,
+        inline_image_types=INLINE_IMAGE_TYPES,
         reminders=reminders,
         deliveries=deliveries,
         csrf_token=csrf(request),
@@ -558,7 +580,7 @@ def run_reminders(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    classroom_ids = {item.id for item in teacher_classes(db, user)}
+    classroom_ids = {item.id for item in list_teacher_classes(db, user)}
     if not classroom_ids:
         raise HTTPException(403, "Teacher access required")
     reminders = request.app.state.reminder_service.run(db, classroom_ids=classroom_ids)

@@ -19,23 +19,27 @@ from app.models import (
     User,
 )
 from app.services.assignment import AssignmentService
-from app.services.authorization import require_student_assignment, require_teacher_class
+from app.services.authorization import (
+    list_teacher_classes,
+    require_student_assignment,
+    require_teacher_class,
+)
 from app.services.invite import InviteService
 from app.services.notification import NotificationService
 from app.services.progress import ProgressService
 from app.services.submission import SubmissionService
 from app.services.telegram_link import TelegramLinkService
 from app.telegram.client import TelegramClient
-from app.telegram.files import TelegramFileService
+from app.telegram.files import TelegramAttachment
 from app.telegram.router import TelegramIntentRouter
 
 logger = logging.getLogger(__name__)
 HELP = (
     "Connect with the secure link provided by Classroom Companion or your teacher.\n"
-    "/join CODE - join a class from a linked student account\n\nCommands:\n"
+    "/join CODE [EMAIL] - join a class from a linked student account\n\nCommands:\n"
     "/assign CLASS_ID instructions and deadline - teacher creates work\n"
     "/ack ASSIGNMENT_ID\n/progress ASSIGNMENT_ID 50 (or a written update)\n/blocked ASSIGNMENT_ID reason\n"
-    "/submit ASSIGNMENT_ID text (or attach a file with this caption)\n/status\n/classes\n/reminders"
+    "/submit ASSIGNMENT_ID text (or attach a file with this caption)\n/status\n/classes\n/reminders\n/cancel - clear a pending chat request"
 )
 
 
@@ -49,7 +53,6 @@ class TelegramService:
         self.submissions = SubmissionService()
         self.invites = InviteService()
         self.links = TelegramLinkService(client.settings)
-        self.files = TelegramFileService(client.settings, client)
         self.intent_router = TelegramIntentRouter(llm, client, self.notifications)
 
     def process(self, db: Session, update: dict) -> dict[str, str | bool]:
@@ -210,8 +213,10 @@ class TelegramService:
             )
             return f"telegram_link:connected:{target.id}"
         if command == "/join":
-            if not user or len(parts) != 2:
+            if not user or len(parts) not in {2, 3}:
                 raise InviteError("Connect your student account using its private link, then send /join CODE.")
+            if len(parts) == 3 and parts[2].casefold() != user.email.casefold():
+                raise InviteError("The email must match your connected classroom account.")
             classroom = self.invites.join(db, user, parts[1], telegram_user_id, chat_id)
             self.client.send(db, user, chat_id, f"You are in {classroom.name}.", kind="joined")
             return f"joined:{classroom.id}"
@@ -220,6 +225,10 @@ class TelegramService:
             return "unlinked"
         if not user.telegram_chat_id:
             user.telegram_chat_id = chat_id
+        if command == "/cancel" and len(parts) == 1:
+            self.intent_router.context.clear(db, user, chat_id)
+            self.client.send(db, user, chat_id, "Cleared the pending chat request.", kind="help")
+            return "context_cleared"
         if command == "/help":
             self.client.send(db, user, chat_id, HELP, kind="help")
             return "help"
@@ -270,6 +279,9 @@ class TelegramService:
                     interpreted = self.llm.progress(db, user.id, body)
                     status, percent = interpreted.status, interpreted.progress_percent
             self.progress.update(db, user, assignment_id, status, body, percent)
+            context = self.intent_router.context.get(db, user, chat_id)
+            if not context or not context.pending_action:
+                self.intent_router.context.set(db, user, chat_id, assignment_id=assignment_id)
             self.client.send(
                 db,
                 user,
@@ -283,47 +295,22 @@ class TelegramService:
                 return "missing_assignment_id"
             assignment_id = int(parts[1])
             require_student_assignment(db, user, assignment_id)
-            document = message.get("document")
-            photos = message.get("photo") or []
-            photo = photos[-1] if photos else None
-            file_data = document or photo
+            attachment = TelegramAttachment.from_message(message)
             body = " ".join(parts[2:]) or None
-            if not body and not file_data:
+            if attachment:
+                return self.intent_router.student.submit_attachment(db, user, chat_id, assignment_id, attachment, update_id)
+            if not body:
                 self.intent_router.context.set(db, user, chat_id, assignment_id=assignment_id, pending_action="submission")
                 self.client.send(db, user, chat_id, f"Send a photo or file, or type /submit {assignment_id} followed by your answer.", kind="submission_prompt")
                 return f"pending_submission:{assignment_id}"
-            stored_path = None
-            original_filename = None
-            mime_type = None
-            content = None
-            if file_data:
-                stored = self.files.download(
-                    str(file_data.get("file_id")),
-                    document.get("file_name") if document else "telegram-photo.jpg",
-                    document.get("mime_type") if document else "image/jpeg",
-                )
-                stored_path = stored.path
-                original_filename = stored.original_filename
-                mime_type = stored.mime_type
-                content = stored.content
             submission = self.submissions.submit(
-                db,
-                user,
-                assignment_id,
-                f"telegram:{update_id}:submission",
-                text_content=body if not file_data else None,
-                telegram_file_id=str(file_data.get("file_id")) if file_data else None,
-                stored_file_path=stored_path,
-                original_filename=original_filename,
-                mime_type=mime_type,
-                content=content,
+                db, user, assignment_id, f"telegram:{update_id}:submission", text_content=body,
             )
-            self.client.send(
-                db, user, chat_id, f"Submission #{submission.id} received.", kind="submission"
-            )
+            self.intent_router.context.set(db, user, chat_id, assignment_id=assignment_id)
+            self.client.send(db, user, chat_id, f"Submission #{submission.id} received.", kind="submission")
             return f"submission:{submission.id}"
         if command in {"/classes", "/reminders", "/status"}:
-            classes = self.intent_router.teacher_classes(db, user)
+            classes = list_teacher_classes(db, user)
             if command == "/classes":
                 body = "\n".join(f"#{item.id} {item.name}" for item in classes)
                 self.client.send(db, user, chat_id, body or "No teaching classes.", kind="classes")
@@ -342,7 +329,7 @@ class TelegramService:
                 self.client.send(db, user, chat_id, body or "No teaching reminders.", kind="reminders")
                 return "reminders"
             if classes:
-                return self.intent_router.send_risk_summary(db, user, chat_id)
+                return self.intent_router.teacher.send_risk_summary(db, user, chat_id)
         if command == "/status":
             rows = db.execute(
                 select(Assignment, StudentAssignmentState)

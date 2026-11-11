@@ -151,7 +151,18 @@ def create_app() -> FastAPI:
             with app.state.session_factory.begin() as db:
                 return app.state.telegram_service.process(db, update)
 
-        return await run_in_threadpool(process_update)
+        result = await run_in_threadpool(process_update)
+        callback = update.get("callback_query")
+        callback_id = callback.get("id") if isinstance(callback, dict) else None
+        if (
+            settings.telegram_mode == "real"
+            and isinstance(callback_id, str)
+            and 0 < len(callback_id) <= 256
+            and not str(result.get("result", "")).startswith("ignored")
+        ):
+            # Telegram can acknowledge the button directly using the webhook response.
+            return {"method": "answerCallbackQuery", "callback_query_id": callback_id}
+        return result
 
     return app
 

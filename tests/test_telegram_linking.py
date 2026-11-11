@@ -303,7 +303,7 @@ def test_targeted_reminder_only_uses_assignment_target(app, db, data):
     ) == 0
 
 
-@pytest.mark.parametrize("final_state", ["completed", "cancelled"])
+@pytest.mark.parametrize("final_state", ["completed", "cancelled", "submitted"])
 def test_final_state_suppresses_targeted_reminder(app, db, data, final_state):
     from app.services.assignment import get_student_state
 

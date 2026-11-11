@@ -55,7 +55,11 @@ class Settings(BaseSettings):
         return normalized or None
 
     @model_validator(mode="after")
-    def validate_real_telegram_credentials(self) -> Settings:
+    def validate_deployment_credentials(self) -> Settings:
+        if self.environment == "production" and (
+            len(self.session_secret) < 32 or self.session_secret == "replace-with-a-long-random-secret"
+        ):
+            raise ValueError("Set a long random SESSION_SECRET for production")
         if self.telegram_mode == "real" and not self.telegram_bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required when TELEGRAM_MODE=real")
         return self

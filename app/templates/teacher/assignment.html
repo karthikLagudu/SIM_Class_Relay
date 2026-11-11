@@ -70,8 +70,12 @@
     <div>
       <strong>{{ s.original_filename or s.text_content or ('Telegram file ' ~ s.telegram_file_id) }}</strong>
       <span>Student #{{ s.student_id }} · {{ s.created_at.strftime('%d %b, %I:%M %p') }}</span>
-      {% if s.stored_file_path and s.mime_type and s.mime_type.startswith('image/') %}<a href="/submissions/{{ s.id }}/file"><img class="submission-preview" src="/submissions/{{ s.id }}/file" alt="Preview of {{ s.original_filename or 'student submission' }}"></a>{% elif s.stored_file_path %}<a class="file-link" href="/submissions/{{ s.id }}/file">View {{ s.original_filename or 'submitted file' }} · {{ s.mime_type or 'file' }}</a>{% endif %}
+      {% if s.stored_file_path and s.mime_type in inline_image_types %}<a href="/submissions/{{ s.id }}/file"><img class="submission-preview" src="/submissions/{{ s.id }}/file" alt="Preview of {{ s.original_filename or 'student submission' }}"></a>{% elif s.stored_file_path %}<a class="file-link" href="/submissions/{{ s.id }}/file">View {{ s.original_filename or 'submitted file' }} · {{ s.mime_type or 'file' }}</a>{% endif %}
     </div>
+    {% for review in feedback if review.submission_id == s.id %}
+    <div class="list-row"><div><strong>Feedback</strong><p>{{ review.message }}</p></div></div>
+    {% endfor %}
+    {% if s.id in reviewable %}
     <form method="post" action="/teacher/submissions/{{ s.id }}/feedback" class="feedback-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="idempotency_key" value="{{ feedback_keys[s.id] }}">
@@ -79,6 +83,7 @@
       <select name="outcome"><option value="revision">Needs revision</option><option value="complete">Complete</option></select>
       <button>Send feedback</button>
     </form>
+    {% endif %}
   </article>{% else %}<p class="empty">No submissions yet.</p>{% endfor %}
 </section>
 {% endblock %}

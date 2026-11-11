@@ -94,7 +94,7 @@ class DemoLLM(LLMProvider):
         if "who needs attention" in lower or "at risk" in lower:
             return TeacherIntent(intent="risk_summary", confidence=0.96)
         if lower.startswith("how is ") or "class status" in lower:
-            return TeacherIntent(intent="class_status", class_reference=clean[7:], confidence=0.9)
+            return TeacherIntent(intent="class_status", class_reference=re.sub(r"\s+doing[?.!]*$", "", clean[7:], flags=re.IGNORECASE), confidence=0.9)
         if lower.startswith("cancel "):
             reference = re.sub(r"^cancel\s+(?:today(?:'s)?\s+)?", "", clean, flags=re.IGNORECASE)
             reference = re.sub(r"\s+(?:homework|assignment)$", "", reference, flags=re.IGNORECASE)
@@ -154,7 +154,7 @@ class DemoLLM(LLMProvider):
         if "help" in lower:
             return StudentIntent(intent="ask_for_help", message=clean, confidence=0.9)
         if any(term in lower for term in ("here's my homework", "here is my homework", "submit")):
-            return StudentIntent(intent="submit_text", message=clean, confidence=0.9)
+            return StudentIntent(intent="submit_attachment", message=clean, confidence=0.9)
         if lower in {"got it", "got it.", "okay", "ok", "i understand"}:
             return StudentIntent(intent="acknowledge", message=clean, confidence=0.96)
         if percent is not None or any(term in lower for term in ("started", "working", "done")):

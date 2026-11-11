@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import select
@@ -118,9 +119,13 @@ class TelegramClient:
             response = self.http.get(f"{self.api_base}/getFile", params={"file_id": file_id})
             response.raise_for_status()
             payload = response.json()
-            if not payload.get("ok") or not payload.get("result", {}).get("file_path"):
+            path = payload.get("result", {}).get("file_path")
+            if (
+                not payload.get("ok") or not isinstance(path, str)
+                or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
+            ):
                 raise TelegramDeliveryError("Telegram file is unavailable")
-            return str(payload["result"]["file_path"])
+            return path
         except TelegramDeliveryError:
             raise
         except Exception as exc:
@@ -131,7 +136,7 @@ class TelegramClient:
         try:
             with self.http.stream(
                 "GET",
-                f"https://api.telegram.org/file/bot{self.settings.telegram_bot_token}/{path}",
+                f"https://api.telegram.org/file/bot{self.settings.telegram_bot_token}/{quote(path, safe='/')}",
             ) as response:
                 response.raise_for_status()
                 expected = int(response.headers.get("content-length", "0") or 0)

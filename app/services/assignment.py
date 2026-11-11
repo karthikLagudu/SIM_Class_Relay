@@ -43,20 +43,21 @@ class AssignmentService:
         draft: bool = False,
     ) -> Assignment:
         classroom = require_teacher_class(db, actor, classroom_id)
+        key = idempotency_key or f"assignment:{uuid.uuid4()}"
+        existing_key = db.get(IdempotencyKey, key)
+        if existing_key:
+            if existing_key.operation != "create_assignment" or not existing_key.result_reference:
+                raise ValidationError("This operation key was already used")
+            existing = db.get(Assignment, int(existing_key.result_reference))
+            if not existing or existing.classroom_id != classroom_id or existing.created_by_user_id != actor.id:
+                raise ValidationError("This operation key was already used")
+            return existing
         if due_at.tzinfo is None:
             raise ValidationError("Deadline must include a timezone")
         if due_at <= datetime.now(UTC):
             raise ValidationError("Deadline must be in the future")
         if not title.strip() or not instructions.strip():
             raise ValidationError("Title and instructions are required")
-        key = idempotency_key or f"assignment:{uuid.uuid4()}"
-        existing_key = db.get(IdempotencyKey, key)
-        if existing_key and existing_key.result_reference:
-            existing = db.get(Assignment, int(existing_key.result_reference))
-            if existing:
-                if existing.classroom_id != classroom_id or existing.created_by_user_id != actor.id:
-                    raise ValidationError("This operation key was already used")
-                return existing
         class_students = list(
             db.scalars(
                 select(User)
@@ -155,12 +156,12 @@ class AssignmentService:
         idempotency_key: str | None = None,
     ) -> Assignment:
         assignment = require_teacher_assignment(db, actor, assignment_id)
+        if self._operation_seen(db, idempotency_key, "update_deadline", assignment.id):
+            return assignment
         if assignment.status == "cancelled":
             raise ValidationError("Cancelled assignments cannot be changed")
         if due_at.tzinfo is None or due_at <= datetime.now(UTC):
             raise ValidationError("New deadline must be a future timezone-aware time")
-        if idempotency_key and db.get(IdempotencyKey, idempotency_key):
-            return assignment
         old = assignment.due_at
         old_aware = old.replace(tzinfo=old.tzinfo or UTC)
         if old_aware == due_at.astimezone(UTC):
@@ -211,13 +212,15 @@ class AssignmentService:
         idempotency_key: str | None = None,
     ) -> Assignment:
         assignment = require_teacher_assignment(db, actor, assignment_id)
+        if self._operation_seen(db, idempotency_key, "update_instructions", assignment.id):
+            return assignment
         if assignment.status == "cancelled":
             raise ValidationError("Cancelled assignments cannot be changed")
-        if idempotency_key and db.get(IdempotencyKey, idempotency_key):
-            return assignment
         clean = instructions.strip()
         if not clean:
             raise ValidationError("Instructions cannot be empty")
+        if idempotency_key:
+            db.add(IdempotencyKey(key=idempotency_key, operation="update_instructions", result_reference=str(assignment.id)))
         if assignment.instructions == clean:
             return assignment
         assignment.instructions = clean
@@ -234,14 +237,6 @@ class AssignmentService:
             )
         )
         operation_key = idempotency_key or f"instructions:{uuid.uuid4()}"
-        if idempotency_key:
-            db.add(
-                IdempotencyKey(
-                    key=idempotency_key,
-                    operation="update_instructions",
-                    result_reference=str(assignment.id),
-                )
-            )
         if self.notifications and assignment.status == "assigned":
             self.notifications.notify_instructions_changed(db, assignment, operation_key)
         return assignment
@@ -254,6 +249,8 @@ class AssignmentService:
         idempotency_key: str | None = None,
     ) -> Assignment:
         assignment = require_teacher_assignment(db, actor, assignment_id)
+        if self._operation_seen(db, idempotency_key, "cancel_assignment", assignment.id):
+            return assignment
         if assignment.status == "cancelled":
             return assignment
         now = datetime.now(UTC)
@@ -290,6 +287,14 @@ class AssignmentService:
         if self.notifications and was_assigned:
             self.notifications.notify_assignment_cancelled(db, assignment)
         return assignment
+
+
+    @staticmethod
+    def _operation_seen(db: Session, key: str | None, operation: str, assignment_id: int) -> bool:
+        row = db.get(IdempotencyKey, key) if key else None
+        if row and (row.operation != operation or row.result_reference != str(assignment_id)):
+            raise ValidationError("This operation key was already used")
+        return row is not None
 
 
 def get_student_state(db: Session, assignment_id: int, student_id: int) -> StudentAssignmentState:

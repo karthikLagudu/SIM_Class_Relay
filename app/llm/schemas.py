@@ -71,6 +71,7 @@ class StudentIntent(BaseModel):
         "blocked",
         "ask_for_help",
         "submit_text",
+        "submit_attachment",
         "status",
         "clarify",
         "unknown",

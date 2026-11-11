@@ -13,6 +13,7 @@ from app.services.authorization import require_student_submission, require_teach
 from app.web.helpers import web_user
 
 router = APIRouter()
+INLINE_IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
 
 @router.get("/submissions/{submission_id}/file")
@@ -34,8 +35,7 @@ def submission_file(
         raise HTTPException(404, "Submission file is unavailable")
     if not path.is_file():
         raise HTTPException(404, "Submission file is unavailable")
-    previews = {"image/jpeg", "image/png", "image/gif", "image/webp"}
-    inline = submission.mime_type in previews
+    inline = submission.mime_type in INLINE_IMAGE_TYPES
     return FileResponse(
         path,
         media_type=submission.mime_type if inline else "application/octet-stream",

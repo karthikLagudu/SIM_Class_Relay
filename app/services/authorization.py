@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import exists, select
+from sqlalchemy import Select, exists, or_, select
 from sqlalchemy.orm import Session
 
 from app.exceptions import AuthorizationError, NotFoundError
@@ -29,23 +29,37 @@ def has_school_role(db: Session, user_id: int, school_id: int, roles: set[str]) 
     )
 
 
+def teacher_class_scope(user_id: int) -> Select[tuple[int]]:
+    schools = select(SchoolMembership.school_id).where(
+        SchoolMembership.user_id == user_id,
+        SchoolMembership.role == "coordinator",
+    )
+    memberships = select(ClassMembership.classroom_id).where(
+        ClassMembership.user_id == user_id,
+        ClassMembership.role == "teacher",
+    )
+    return select(Classroom.id).where(
+        or_(Classroom.school_id.in_(schools), Classroom.id.in_(memberships))
+    )
+
+
+def list_teacher_classes(db: Session, user: User) -> list[Classroom]:
+    return list(
+        db.scalars(
+            select(Classroom)
+            .where(
+                Classroom.id.in_(teacher_class_scope(user.id)),
+            )
+            .order_by(Classroom.name, Classroom.id)
+        )
+    )
+
+
 def require_teacher_class(db: Session, user: User, classroom_id: int) -> Classroom:
     classroom = db.get(Classroom, classroom_id)
     if not classroom:
         raise NotFoundError("Class not found")
-    is_coordinator = has_school_role(db, user.id, classroom.school_id, {"coordinator"})
-    is_teacher = bool(
-        db.scalar(
-            select(
-                exists().where(
-                    ClassMembership.classroom_id == classroom_id,
-                    ClassMembership.user_id == user.id,
-                    ClassMembership.role == "teacher",
-                )
-            )
-        )
-    )
-    if not (is_coordinator or is_teacher):
+    if db.scalar(teacher_class_scope(user.id).where(Classroom.id == classroom_id)) is None:
         raise AuthorizationError("Resource is outside your authorized scope")
     return classroom
 

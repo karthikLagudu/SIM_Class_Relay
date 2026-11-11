@@ -267,7 +267,13 @@ def test_natural_language_teacher_and_student_flows(app, db, data):
             "update_id": update_id,
             "message": {"from": {"id": 201}, "chat": {"id": 201}, "text": text},
         }
-        app.state.telegram_service.process(db, update)
+        outcome = app.state.telegram_service.process(db, update)
+        if expected == "acknowledged":
+            assert outcome["result"] == "student_needs_context"
+            assert get_student_state(db, assignment_id, data["student1"].id).status == "assigned"
+            chosen = {"update_id": 505, "message": {**update["message"], "text": f"#{assignment_id}"}}
+            outcome = app.state.telegram_service.process(db, chosen)
+        assert outcome["result"] == f"progress:{assignment_id}:{expected}"
         db.flush()
         assert get_student_state(db, assignment_id, data["student1"].id).status == expected
 
@@ -282,7 +288,7 @@ def test_file_after_message_uses_expiring_context(app, db, data, monkeypatch, tm
         "message": {
             "from": {"id": 201},
             "chat": {"id": 201},
-            "text": "Here's my homework",
+            "text": "Here's my homework.",
         },
     }
     assert "pending_submission" in str(app.state.telegram_service.process(db, first)["result"])
