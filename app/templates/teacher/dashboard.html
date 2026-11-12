@@ -1,41 +1,46 @@
 {% extends "base.html" %}
-{% from "components.html" import assignment_badge, delivery_badge %}
+{% from "components.html" import assignment_badge, delivery_badge, teacher_class_nav %}
 {% block content %}
+{% if active %}<nav class="breadcrumbs" aria-label="Breadcrumb">{% if coordinating %}<a href="/coordinator?school_id={{ school.id }}">{{ school.name }}</a><span aria-hidden="true">/</span><a href="/coordinator/classes/{{ active.id }}">{{ active.name }} management</a>{% else %}<a href="/teacher">Your classes</a>{% endif %}</nav>{% endif %}
 <header class="hero compact-hero workspace-hero class-heading">
   <div class="class-context">
-    <p class="eyebrow">{{ school.name if school else "Teacher workspace" }}</p>
+    <p class="eyebrow">{{ school.name if school else 'Teacher workspace' }}</p>
     <h1>{{ active.name if active else "Your classes" }}</h1>
     {% if active %}
-    <form class="scope-picker" method="get" action="/teacher">
-      <label for="active-class">Active class</label>
-      <select id="active-class" name="class_id">
-        {% for c in classes %}<option value="{{ c.id }}" {% if c.id == active.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
-      </select>
-      <button class="ghost-button">Switch class</button>
-    </form>
+    <p>{{ active.grade }}</p>
+    {% elif classes %}
+    <p>{{ classes|length }} assigned {{ 'class' if classes|length == 1 else 'classes' }} · Daily work across your classes</p>
     {% endif %}
   </div>
-  {% if active %}
+  {% if active and not active.archived_at %}
   <div class="actions">
-    <a class="primary button-link" href="/teacher/classes/{{ active.id }}/assignments/new">New assignment</a>
-    <a class="ghost-button button-link" href="/teacher/classes/{{ active.id }}">Manage class</a>
+    <a class="primary button-link" href="/{{ workspace }}/classes/{{ active.id }}/assignments/new">New assignment</a>
   </div>
   {% endif %}
+  {% if not active and classes %}<div class="actions"><a class="primary button-link" href="/teacher/submissions">Open review queue</a></div>{% endif %}
 </header>
 {% if active %}
+{% if coordinating %}<nav class="section-links" aria-label="Class sections"><a href="/coordinator/classes/{{ active.id }}">Class management</a><a href="#assignments">Assignments</a><a href="/coordinator/submissions?school_id={{ school.id }}&amp;class_id={{ active.id }}">Class submissions</a></nav>
+{% else %}{{ teacher_class_nav(active) }}{% endif %}
+{% endif %}
+{% if active and active.archived_at %}<p class="notice">This class is archived. Its assignment, submission, and delivery history is read-only.</p>
+{% elif active or classes %}
 <nav class="metrics workflow-metrics" aria-label="Class priorities">
-  <a href="#reviews" class="metric"><strong>{{ reviews|length }}</strong><span>Awaiting review</span></a>
-  <a href="#attention" class="metric {% if blocked_count %}danger{% endif %}"><strong>{{ blocked_count }}</strong><span>Need help</span></a>
-  <a href="#due-soon" class="metric"><strong>{{ due_soon|length }}</strong><span>Due in 24 hours</span></a>
+  <a href="#reviews" class="metric review-metric"><span class="metric-icon" aria-hidden="true">✓</span><strong>{{ reviews|length }}</strong><span>Awaiting review</span></a>
+  <a href="#attention" class="metric help-metric"><span class="metric-icon" aria-hidden="true">!</span><strong>{{ blocked_count }}</strong><span>Need help</span></a>
+  <a href="#due-soon" class="metric deadline-metric"><span class="metric-icon" aria-hidden="true">◷</span><strong>{{ due_soon|length }}</strong><span>Due in 24 hours</span></a>
 </nav>
 
 <div class="grid class-priorities">
   <section class="card" id="reviews" aria-labelledby="reviews-title">
-    <h2 id="reviews-title">Review submissions</h2>
+    <div class="section-head"><h2 id="reviews-title">Review submissions</h2>
+      {% if coordinating %}<a href="/coordinator/submissions?school_id={{ school.id }}&amp;class_id={{ active.id }}&amp;status=awaiting">Open review queue</a>
+      {% else %}<a href="/teacher/submissions{{ '?class_id=' ~ active.id if active else '' }}">View all</a>{% endif %}
+    </div>
     <div class="list">
-      {% for submission, assignment, student in reviews %}
-      <a href="/teacher/assignments/{{ assignment.id }}#submission-{{ submission.id }}" class="list-row">
-        <div><strong>{{ student.name }}</strong><span>{{ assignment.title }}</span></div><span class="row-action">Review</span>
+      {% for submission, assignment, student in reviews[:5] %}
+      <a href="/{{ workspace }}/submissions/{{ submission.id }}" class="list-row">
+        <div><strong>{{ student.name }}</strong><span>{{ assignment.title }} · {{ classroom_names[assignment.classroom_id] }}</span><span>Submitted {{ submission.created_at|local_deadline(assignment.timezone) }}</span></div><span class="row-action">Review</span>
       </a>
       {% else %}<p class="empty">No submissions awaiting review. New work appears here as students submit it.</p>{% endfor %}
     </div>
@@ -44,8 +49,8 @@
     <h2 id="attention-title">Needs attention</h2>
     <div class="list">
       {% for item in risks %}
-      <a href="/teacher/assignments/{{ item.assignment_id }}#student-{{ item.student_id }}" class="list-row">
-        <div><strong>{{ item.student_name }}</strong><span>{{ item.assignment_title }}</span>
+      <a href="/{{ workspace }}/classes/{{ item.classroom_id }}/assignments/{{ item.assignment_id }}#student-{{ item.student_id }}" class="list-row">
+        <div><strong>{{ item.student_name }}</strong><span>{{ item.assignment_title }} · {{ classroom_names[item.classroom_id] }}</span>
           <span>{{ item.reasons|join(' · ')|capitalize }}</span></div>
         <b class="badge {{ 'blocked' if item.risk_level in ('high', 'critical') else 'needs_revision' }}">{{ item.risk_level|capitalize }}</b>
       </a>
@@ -56,20 +61,22 @@
     <h2 id="due-title">Due in the next 24 hours</h2>
     <div class="list">
       {% for item in due_soon %}
-      <a href="/teacher/assignments/{{ item.id }}" class="list-row"><div><strong>{{ item.title }}</strong><span>{{ item.due_at|local_deadline(item.timezone) }}</span></div></a>
+      <a href="{{ item|assignment_path(workspace) }}" class="list-row"><div><strong>{{ item.title }}</strong><span>{{ classroom_names[item.classroom_id] }} · Due {{ item.due_at|local_deadline(item.timezone) }}</span></div></a>
       {% else %}<p class="empty">No published assignments are due in the next 24 hours.</p>{% endfor %}
     </div>
   </section>
 </div>
 
+{% endif %}
+{% if active %}
   <section class="card" id="assignments" aria-labelledby="assignments-title">
     <h2 id="assignments-title">Assignments</h2>
     <div class="list">
       {% for item in assignments %}
-      <a href="/teacher/assignments/{{ item.id }}" class="list-row">
+      <a href="{{ item|assignment_path(workspace) }}" class="list-row">
         <div><strong>{{ item.title }}</strong><span>Due {{ item.due_at|local_deadline(item.timezone) }}</span></div>{{ assignment_badge(item.status) }}
       </a>
-      {% else %}<p class="empty">This class has no assignments yet. <a href="/teacher/classes/{{ active.id }}/assignments/new">Create your first draft</a>.</p>{% endfor %}
+      {% else %}<p class="empty">This class has no assignments yet. {% if not active.archived_at %}<a href="/{{ workspace }}/classes/{{ active.id }}/assignments/new">Create your first draft</a>.{% endif %}</p>{% endfor %}
     </div>
   </section>
 
@@ -78,36 +85,29 @@
   {% if offline_demo %}<p class="mode-note">Offline demo. Telegram messages are simulated.</p>{% endif %}
   <div class="list">
   {% for item in deliveries %}
-    <a class="list-row" href="/teacher/assignments/{{ item.assignment_id }}#notifications">
+    <a class="list-row" href="/{{ workspace }}/classes/{{ active.id }}/assignments/{{ item.assignment_id }}#notifications">
       <div><strong>{{ item.kind|replace('_',' ')|capitalize }}</strong><span>{{ item.body|truncate(100) }}</span></div>{{ delivery_badge(item.status) }}
     </a>
   {% else %}<p class="empty">No class notifications yet. Publish an assignment to start the delivery history.</p>{% endfor %}
   </div>
+  {% if not coordinating %}
   <form action="/teacher/reminders/run#notifications" method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="class_id" value="{{ active.id }}">
     <button class="ghost-button">Run reminders for {{ active.name }}</button>
   </form>
+  {% endif %}
 </details>
 {% else %}
-<section class="card">
-  <h2>No classes yet</h2>
-  <p>Create a class to start enrolling students and assigning work.</p>
+<section class="card" aria-labelledby="assigned-classes-title">
+  <h2 id="assigned-classes-title">Assigned classes</h2>
+  {% if classes %}
+  <div class="teaching-class-grid">
+    {% for classroom in classes %}
+    <a class="list-row" href="/teacher?class_id={{ classroom.id }}"><div><strong>{{ classroom.name }}</strong><span>{{ classroom.grade }} · {{ schools[classroom.school_id].name }}</span></div><span class="row-action">Open class <span aria-hidden="true">→</span></span></a>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">No classes have been assigned to you yet. Ask your school coordinator to assign you to a class.</p>{% endif %}
 </section>
 {% endif %}
-<details id="create-class" class="card disclosure" {% if not active or class_error %}open{% endif %}>
-  <summary>Create a class</summary>
-  {% if class_error %}<div class="error" id="create-class-error" role="alert">{{ class_error }}</div>{% endif %}
-  {% if schools %}
-  <form method="post" action="/teacher/classes#create-class" class="stack">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="form-grid">
-      <label>School <select name="school_id">{% for item in schools %}<option value="{{ item.id }}" {% if item.id == form.get('school_id', school.id if school else none) %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></label>
-      <label>Class name <input name="name" value="{{ form.get('name','') }}" required {% if class_error %}aria-describedby="create-class-error"{% endif %}></label>
-      <label>Grade <input name="grade" value="{{ form.get('grade','') }}" required {% if class_error %}aria-describedby="create-class-error"{% endif %}></label>
-    </div>
-    <div class="actions"><button class="ghost-button">Create class</button></div>
-  </form>
-  {% else %}<p>Ask a coordinator to add you to a school before creating a class.</p>{% endif %}
-</details>
 {% endblock %}

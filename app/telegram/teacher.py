@@ -280,7 +280,16 @@ class TeacherConversation:
             self.assignments.cancel(db, user, assignment.id, f"telegram:{update_id}:cancel")
             response = f"Cancelled #{assignment.id}."
         self.context.set(db, user, chat_id, assignment_id=assignment.id)
-        self.client.send(db, user, chat_id, response, kind="teacher_confirmation")
+        self.client.send(
+            db,
+            user,
+            chat_id,
+            response,
+            kind="teacher_confirmation",
+            school_id=assignment.school_id,
+            classroom_id=assignment.classroom_id,
+            assignment_id=assignment.id,
+        )
         return f"{parsed.intent}:{assignment.id}"
 
     def _teacher_deadline(
@@ -329,7 +338,7 @@ class TeacherConversation:
             user,
             chat_id,
             prompt + ". Reply with #ID or the full title, or use /cancel.",
-            kind="clarification",
+            kind="teacher_clarification",
         )
         return "teacher_needs_context"
 

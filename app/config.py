@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Class Relay"
     environment: str = "development"
+    demo_mode: bool = False
     database_url: str = "sqlite:///./classroom_companion.db"
     session_secret: str = "development-only-change-me"
     base_url: str = "http://127.0.0.1:8000"

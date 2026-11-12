@@ -12,6 +12,7 @@ from app.database import begin_sqlite_write
 from app.exceptions import AuthorizationError, NotFoundError, TelegramDeliveryError
 from app.models import (
     Assignment,
+    Classroom,
     NotificationDelivery,
     Reminder,
     School,
@@ -105,7 +106,12 @@ class DeliveryProcessor:
             else require_student_assignment
         )
         assignment = check(db, user, delivery.assignment_id)
-        if assignment.status == "cancelled" and delivery.kind != "assignment_cancelled":
+        if db.get(Classroom, assignment.classroom_id).archived_at:
+            raise AuthorizationError("The class was archived")
+        if assignment.status == "cancelled" and delivery.kind not in {
+            "assignment_cancelled",
+            "teacher_confirmation",
+        }:
             raise AuthorizationError("The assignment was cancelled")
         if delivery.kind == "deadline_updated" and not (delivery.idempotency_key or "").startswith(
             f"deadline:{assignment.id}:v{assignment.schedule_version}:"

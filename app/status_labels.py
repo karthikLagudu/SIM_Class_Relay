@@ -20,6 +20,18 @@ DELIVERY_STATUS = {
     "failed": "Failed",
 }
 
+REVIEW_STATUS = {
+    "awaiting": "Awaiting review",
+    "revision": "Revision requested",
+    "complete": "Complete",
+    "feedback": "Feedback saved",
+    "closed": "Review closed",
+}
+
+
+def review_status(value: str) -> str:
+    return REVIEW_STATUS[value]
+
 
 def student_status(value: str) -> str:
     return STUDENT_STATUS.get(value, value.replace("_", " ").capitalize())

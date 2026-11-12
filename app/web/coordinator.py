@@ -1,19 +1,151 @@
 from __future__ import annotations
 
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy import func, select
+from itsdangerous import BadSignature, URLSafeTimedSerializer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
 from app.database import get_db
 from app.exceptions import AuthorizationError, ValidationError
-from app.models import ClassMembership, Classroom, School, SchoolMembership, User
-from app.services.authorization import has_school_role
+from app.models import ClassMembership, Classroom, School, User
+from app.services.authorization import (
+    coordinator_class_scope,
+    require_coordinator_class,
+)
 from app.services.classroom import ClassroomService
-from app.web.helpers import csrf, redirect_with_message, render, web_user
+from app.services.staffing import apply_staffing, staffing_plan
+from app.services.workload import class_workloads, school_teachers, school_users, teacher_directory
+from app.web.helpers import coordinator_school, csrf, redirect_with_message, render, web_user
+from app.web.school_activity import school_activity
 
 router = APIRouter()
+
+
+def _school_classes(db: Session, school_id: int) -> list[Classroom]:
+    return list(
+        db.scalars(
+            select(Classroom)
+            .where(Classroom.school_id == school_id)
+            .order_by(Classroom.archived_at.is_not(None), Classroom.name, Classroom.id)
+        )
+    )
+
+
+@router.get("/coordinator/schools/{school_id}/teachers/{teacher_id}", response_class=HTMLResponse)
+def teacher_detail(
+    request: Request,
+    school_id: int,
+    teacher_id: int,
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    school = coordinator_school(request, db, user, school_id)
+    teacher = next((item for item in school_teachers(db, school_id) if item.id == teacher_id), None)
+    if not teacher:
+        raise AuthorizationError("Resource is outside your authorized scope")
+    classes = _school_classes(db, school_id)
+    row = teacher_directory([teacher], class_workloads(db, classes))[0]
+    return render(
+        request,
+        "coordinator/teacher.html",
+        school=school,
+        row=row,
+        classes=[item for item in classes if not item.archived_at],
+        selected_ids={item.classroom.id for item in row["classes"]},
+        message=request.query_params.get("message"),
+    )
+
+
+def _staffing_token(request: Request) -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(
+        request.app.state.settings.session_secret, salt="coordinator-staffing-v1"
+    )
+
+
+def _staffing_destination(plan: dict) -> str:
+    if plan["class_id"] is not None:
+        return f"/coordinator/classes/{plan['class_id']}"
+    return f"/coordinator/schools/{plan['school_id']}/teachers/{plan['teacher_id']}"
+
+
+@router.post("/coordinator/staffing/preview", response_class=HTMLResponse)
+def preview_staffing(
+    request: Request,
+    school_id: int = Form(),
+    class_id: int | None = Form(None),
+    teacher_id: int | None = Form(None),
+    selected_ids: list[int] = Form(default=[]),
+    revoke: bool = Form(False),
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    school = coordinator_school(request, db, user, school_id)
+    plan = staffing_plan(
+        db, user, school_id, selected_ids, class_id=class_id, teacher_id=teacher_id, revoke=revoke
+    )
+    return render(
+        request,
+        "coordinator/staffing.html",
+        plan=plan,
+        token=_staffing_token(request).dumps(plan),
+        school=school,
+        classroom=db.get(Classroom, class_id) if class_id else None,
+        classes={item.id: item for item in _school_classes(db, school_id)},
+        teachers={item.id: item for item in school_teachers(db, school_id)},
+        back_url=_staffing_destination(plan),
+    )
+
+
+@router.post("/coordinator/staffing/confirm")
+def confirm_staffing(
+    request: Request,
+    plan_token: str = Form(),
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    try:
+        plan = _staffing_token(request).loads(plan_token, max_age=15 * 60)
+    except BadSignature as exc:
+        raise ValidationError(
+            "This staffing preview expired or is invalid. Open the class or teacher and review the change again."
+        ) from exc
+    if plan["actor_id"] != user.id:
+        raise AuthorizationError("Resource is outside your authorized scope")
+    coordinator_school(request, db, user, plan["school_id"])
+    destination = _staffing_destination(plan)
+    try:
+        apply_staffing(db, user, plan)
+    except ValidationError as exc:
+        db.rollback()
+        return render(
+            request,
+            "error.html",
+            status_code=409,
+            code=409,
+            detail=str(exc),
+            recovery_url=destination,
+            recovery_label="Return to staffing",
+            school=db.get(School, plan["school_id"]),
+            classroom=db.get(Classroom, plan["class_id"]) if plan["class_id"] else None,
+        )
+    db.commit()
+    if plan["revoke"]:
+        return redirect_with_message(
+            f"/coordinator?school_id={plan['school_id']}",
+            "Teaching access removed. Other roles and classroom history were preserved.",
+            anchor="teacher-roster",
+        )
+    return redirect_with_message(
+        destination, "Teaching assignments saved. Access has been updated."
+    )
 
 
 @router.get("/coordinator", response_class=HTMLResponse)
@@ -27,67 +159,201 @@ def coordinator_dashboard(
 
 
 def _render_school(request, user, db, school_id=None, *, errors=None, form=None):
-    schools = list(
-        db.scalars(
-            select(School)
-            .join(SchoolMembership, SchoolMembership.school_id == School.id)
-            .where(SchoolMembership.user_id == user.id, SchoolMembership.role == "coordinator")
-            .order_by(School.name)
-        )
-    )
+    schools = getattr(request.state, "managed_schools", ())
     if not schools:
         raise HTTPException(403, "Use a coordinator account to open the school overview.")
-    school = (
-        schools[0]
-        if school_id is None
-        else next((item for item in schools if item.id == school_id), None)
+    school = coordinator_school(
+        request, db, user, schools[0].id if school_id is None else school_id
     )
-    if not school:
-        raise AuthorizationError("Resource is outside your authorized scope")
-    classes = list(
-        db.scalars(
-            select(Classroom).where(Classroom.school_id == school.id).order_by(Classroom.name)
+    classes = _school_classes(db, school.id)
+    teachers = school_teachers(db, school.id)
+    workloads = class_workloads(db, classes)
+    directory = teacher_directory(teachers, workloads)
+    query = request.query_params.get("q", "").strip()
+    filter_by = request.query_params.get("class_filter", "")
+    if filter_by and filter_by not in {
+        "unassigned",
+        *(str(classroom.id) for classroom in classes if not classroom.archived_at),
+    }:
+        raise ValidationError("Choose a class from this school or select Unassigned.")
+    directory = [
+        row
+        for row in directory
+        if query.casefold() in row["teacher"].name.casefold()
+        and (
+            not filter_by
+            or (filter_by == "unassigned" and not row["classes"])
+            or any(str(item.classroom.id) == filter_by for item in row["classes"])
         )
-    )
-    teachers = list(
-        db.scalars(
-            select(User)
-            .join(SchoolMembership, SchoolMembership.user_id == User.id)
-            .where(SchoolMembership.school_id == school.id, SchoolMembership.role == "teacher")
-            .order_by(User.name)
-        )
-    )
-    class_ids = [item.id for item in classes]
-    counts = dict(
-        db.execute(
-            select(ClassMembership.classroom_id, func.count())
-            .where(ClassMembership.classroom_id.in_(class_ids), ClassMembership.role == "student")
-            .group_by(ClassMembership.classroom_id)
-        ).all()
-    )
-    teacher_classes = {}
-    for user_id, classroom in db.execute(
-        select(ClassMembership.user_id, Classroom)
-        .join(Classroom, Classroom.id == ClassMembership.classroom_id)
-        .where(Classroom.school_id == school.id, ClassMembership.role == "teacher")
-        .order_by(Classroom.name)
-    ):
-        teacher_classes.setdefault(user_id, []).append(classroom)
+    ]
     return render(
         request,
         "coordinator/dashboard.html",
         user=user,
         school=school,
-        schools=schools,
         classes=classes,
         teachers=teachers,
-        counts=counts,
-        teacher_classes=teacher_classes,
+        student_count=len(school_users(db, school.id, "student")),
+        pending_reviews=sum(len(item.reviews) for item in workloads.values()),
+        workloads=workloads,
+        recent_assignments=sorted(
+            (assignment for item in workloads.values() for assignment in item.assignments),
+            key=lambda item: (item.updated_at, item.id),
+            reverse=True,
+        )[:8],
+        directory=directory,
+        query=query,
+        filter_by=filter_by,
+        active_classes=[item for item in classes if not item.archived_at],
+        activity=school_activity(db, school.id),
         csrf_token=csrf(request),
         message=request.query_params.get("message"),
         errors=errors or {},
         form=form or {},
         status_code=422 if errors else 200,
+    )
+
+
+@router.post("/coordinator/schools/{school_id}/edit")
+def edit_school(
+    request: Request,
+    school_id: int,
+    name: str = Form(),
+    timezone: str = Form(),
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    coordinator_school(request, db, user, school_id)
+    try:
+        ClassroomService().edit_school(db, user, school_id, name, timezone)
+        db.commit()
+    except ValidationError as exc:
+        db.rollback()
+        return _render_school(
+            request,
+            user,
+            db,
+            school_id,
+            errors={"school": str(exc)},
+            form={"school_name": name, "timezone": timezone},
+        )
+    return redirect_with_message(
+        f"/coordinator?school_id={school_id}", "School details saved.", anchor="school-settings"
+    )
+
+
+@router.get("/coordinator/schools/{school_id}/students", response_class=HTMLResponse)
+def student_directory(
+    request: Request,
+    school_id: int,
+    q: str = "",
+    class_filter: str = "",
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    school = coordinator_school(request, db, user, school_id)
+    return _render_students(request, db, school, q=q, class_filter=class_filter)
+
+
+def _render_students(request, db, school, *, q="", class_filter="", error=None, form=None):
+    classes = {item.id: item for item in _school_classes(db, school.id) if not item.archived_at}
+    if class_filter and class_filter not in {"unassigned", *(str(item) for item in classes)}:
+        raise ValidationError("Choose a class from this school or select Unassigned.")
+    enrollments = defaultdict(list)
+    for member in db.scalars(
+        select(ClassMembership)
+        .where(
+            ClassMembership.classroom_id.in_(classes),
+            ClassMembership.role == "student",
+        )
+        .order_by(ClassMembership.classroom_id)
+    ):
+        enrollments[member.user_id].append(classes[member.classroom_id])
+    query = q.strip().casefold()
+    students = [
+        student
+        for student in school_users(db, school.id, "student")
+        if (not query or query in student.name.casefold() or query in student.email.casefold())
+        and (
+            not class_filter
+            or (class_filter == "unassigned" and not enrollments[student.id])
+            or any(str(item.id) == class_filter for item in enrollments[student.id])
+        )
+    ]
+    return render(
+        request,
+        "coordinator/students.html",
+        school=school,
+        students=students,
+        enrollments=enrollments,
+        classes=list(classes.values()),
+        query=q.strip(),
+        filter_by=class_filter,
+        error=error,
+        form=form or {},
+        status_code=422 if error else 200,
+        message=request.query_params.get("message"),
+    )
+
+
+@router.post("/coordinator/schools/{school_id}/students")
+def create_student(
+    request: Request,
+    school_id: int,
+    name: str = Form(),
+    email: str = Form(),
+    temporary_password: str = Form(),
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    school = coordinator_school(request, db, user, school_id)
+    try:
+        student = ClassroomService().create_school_student(
+            db, user, school_id, name, email, temporary_password
+        )
+        db.commit()
+    except ValidationError as exc:
+        db.rollback()
+        return _render_students(
+            request, db, school, error=str(exc), form={"name": name, "email": email}
+        )
+    return redirect_with_message(
+        f"/coordinator/schools/{school_id}/students",
+        f"{student.name} added. Choose a class to enroll them.",
+        anchor=f"student-{student.id}",
+    )
+
+
+@router.post("/coordinator/schools/{school_id}/students/{student_id}/enroll")
+def enroll_student(
+    request: Request,
+    school_id: int,
+    student_id: int,
+    class_id: int = Form(),
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    coordinator_school(request, db, user, school_id)
+    classroom = require_coordinator_class(db, user, class_id)
+    if classroom.school_id != school_id:
+        raise AuthorizationError("Resource is outside your authorized scope")
+    student = next(
+        (item for item in school_users(db, school_id, "student") if item.id == student_id), None
+    )
+    if not student:
+        raise AuthorizationError("Resource is outside your authorized scope")
+    ClassroomService().add_student(db, user, class_id, student.name, student.email, "")
+    db.commit()
+    return redirect_with_message(
+        f"/coordinator/schools/{school_id}/students",
+        f"{student.name} is enrolled in {classroom.name}.",
+        anchor=f"student-{student.id}",
     )
 
 
@@ -102,8 +368,7 @@ def add_class(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    if not has_school_role(db, user.id, school_id, {"coordinator"}):
-        raise AuthorizationError("Resource is outside your authorized scope")
+    coordinator_school(request, db, user, school_id)
     try:
         classroom = ClassroomService().create_classroom(db, user, school_id, name, grade)
         db.commit()
@@ -137,6 +402,7 @@ def add_teacher(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
+    coordinator_school(request, db, user, school_id)
     try:
         teacher = ClassroomService().add_teacher(
             db,
@@ -162,4 +428,31 @@ def add_teacher(
         f"/coordinator?school_id={school_id}",
         f"{teacher.name} can now sign in. Share the temporary password privately.",
         anchor="teacher-roster",
+    )
+
+
+@router.post("/coordinator/reminders/run")
+def run_school_reminders(
+    request: Request,
+    school_id: int = Form(),
+    csrf_token: str = Form(),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    coordinator_school(request, db, user, school_id)
+    class_ids = set(
+        db.scalars(coordinator_class_scope(user.id).where(Classroom.school_id == school_id))
+    )
+    reminders = (
+        request.app.state.reminder_service.run(db, classroom_ids=class_ids) if class_ids else []
+    )
+    db.commit()
+    message = (
+        f"Processed {len(reminders)} reminder jobs."
+        if reminders
+        else "No reminder jobs are due for this school."
+    )
+    return redirect_with_message(
+        f"/coordinator?school_id={school_id}", message, anchor="school-reminders"
     )

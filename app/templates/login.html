@@ -2,26 +2,77 @@
 {% block content %}
 <div class="login-wrap">
   <header class="login-copy">
-    <h1>Class Relay <span>by Super Intelli Machines</span></h1>
+    <h1>Class Relay</h1>
+    <img class="login-company-logo" src="{{ url_for('static', path='/images/super-intelli-machines.png') }}" width="708" height="130" alt="Super Intelli Machines. Building agents that do the work, so people do not have to.">
+    <div class="login-brand-compact">
+      <div class="login-company-name">
+        <img class="brand-mark" src="{{ url_for('static', path='/images/sim-mark.png') }}" width="42" height="42" alt="">
+        <strong>Super Intelli Machines</strong>
+      </div>
+      <p class="login-tagline">Building agents that do the work, so people do not have to.</p>
+    </div>
     <p>Sign in with your school account to open your workspace.</p>
-    {% if demo %}<a class="demo-link" href="#demo-accounts">See demo accounts</a>{% endif %}
   </header>
-  <form class="card stack login-card" method="post" action="/login" aria-labelledby="sign-in-heading">
+  <form class="card stack login-card" id="login-form" method="post" action="/login" aria-labelledby="sign-in-heading">
     <h2 id="sign-in-heading">Sign in</h2>
     {% if error %}<div id="login-error" class="error" role="alert">{{ error }}</div>{% endif %}
     <label>Email<input type="email" name="email" value="{{ email|default('') }}" autocomplete="username" required {% if error %}aria-describedby="login-error"{% endif %}></label>
     <label>Password<input type="password" name="password" autocomplete="current-password" required {% if error %}aria-describedby="login-error"{% endif %}></label>
-    <button class="primary">Sign in</button>
+    {% if demo_groups %}<p class="field-hint" id="demo-login-status" role="status" hidden></p>{% endif %}
+    <button class="primary" type="submit">Sign in</button>
   </form>
-  {% if demo %}
-  <section class="card demo-card" id="demo-accounts" aria-labelledby="demo-heading">
-    <div class="section-head"><h2 id="demo-heading">Demo accounts</h2><p class="mode-note">Telegram deliveries are simulated.</p></div>
-    <dl class="demo-accounts">
-      <div><dt>Teacher</dt><dd><code>teacher@demo.local</code><br><code>Teacher123!</code></dd></div>
-      <div><dt>Student</dt><dd><code>student1@demo.local</code><br><code>Student123!</code></dd></div>
-      <div><dt>Coordinator</dt><dd><code>coordinator@demo.local</code><br><code>Coordinator123!</code></dd></div>
-    </dl>
-  </section>
+  {% if demo_groups %}
+  <div class="card demo-card">
+    <button class="ghost-button" id="demo-toggle" type="button" aria-expanded="false" aria-controls="demo-accounts">Show demo accounts</button>
+    <section id="demo-accounts" aria-labelledby="demo-heading" hidden>
+      <div class="section-head"><h2 id="demo-heading">Demo accounts</h2><p class="mode-note">Telegram deliveries are simulated.</p></div>
+      <p class="field-hint">Choose an account to fill the sign-in form. Accounts with multiple roles appear in each matching group.</p>
+      {% set role_labels = {"coordinator": "Coordinators", "teacher": "Teachers", "student": "Students"} %}
+      <div class="section-links demo-role-filters" role="group" aria-label="Filter demo accounts by role">
+        {% for role, accounts in demo_groups.items() %}
+        <button class="ghost-button" type="button" data-demo-role aria-pressed="{{ 'true' if loop.first else 'false' }}" aria-controls="demo-{{ role }}-results">{{ role_labels[role] }} ({{ accounts|length }})</button>
+        {% endfor %}
+      </div>
+      <label for="demo-search">Search demo accounts</label>
+      <div class="demo-search">
+        <input id="demo-search" type="search" placeholder="Search by name, email, school, or class." autocomplete="off" autocapitalize="none" spellcheck="false">
+        <button class="ghost-button" type="button" data-demo-clear>Clear</button>
+        <p class="field-hint" id="demo-result-count" role="status"></p>
+      </div>
+      {% for role, accounts in demo_groups.items() %}
+      <section class="demo-group" id="demo-{{ role }}-results" aria-labelledby="demo-{{ role }}" {% if not loop.first %}hidden{% endif %}>
+        <h3 id="demo-{{ role }}">{{ role_labels[role] }}</h3>
+        <ul class="demo-accounts">
+          {% for account in accounts %}
+          <li data-demo-search="{{ account.name }} {{ account.email }}{% for school, classes in account.access %} {{ school }} {{ classes|join(' ') }}{% endfor %}">
+            <strong>{{ account.name }}</strong>
+            <code>{{ account.email }}</code>
+            {% if account.multi_school or account.roles|length > 1 %}
+            <div class="demo-badges">
+              {% if account.multi_school %}<span class="badge">Multi-school coordinator</span>{% endif %}
+              {% if account.roles|length > 1 %}<span class="badge">Multiple roles · {{ account.roles|join(' and ') }}</span>{% endif %}
+            </div>
+            {% endif %}
+            <ul class="demo-access">
+              {% for school, classes in account.access %}
+              <li>{{ school }}{% if role != 'coordinator' %} · {{ classes|join(', ') if classes else ('No assigned classes' if role == 'teacher' else 'No enrolled classes') }}{% endif %}</li>
+              {% endfor %}
+            </ul>
+            <button class="ghost-button" type="button" data-demo-email="{{ account.email }}" data-demo-password="{{ account.password }}" data-demo-name="{{ account.name }}" aria-label="Use this account for {{ account.name }}">Use this account</button>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endfor %}
+      <div class="demo-empty" id="demo-empty" hidden>
+        <strong>No matching accounts</strong>
+        <button class="ghost-button" type="button" data-demo-clear>Clear search</button>
+      </div>
+    </section>
+  </div>
   {% endif %}
 </div>
+{% endblock %}
+{% block scripts %}
+  {% if demo_groups %}<script src="{{ url_for('static', path='/js/demo-login.js').include_query_params(v='role-search-1') }}" defer></script>{% endif %}
 {% endblock %}

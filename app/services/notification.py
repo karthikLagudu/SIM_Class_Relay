@@ -6,7 +6,14 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Assignment, AssignmentTarget, Classroom, NotificationDelivery, User
+from app.models import (
+    Assignment,
+    AssignmentTarget,
+    ClassMembership,
+    Classroom,
+    NotificationDelivery,
+    User,
+)
 from app.telegram.client import TelegramClient
 
 
@@ -19,16 +26,19 @@ class NotificationService:
     @staticmethod
     def format_deadline(value: datetime, timezone_name: str) -> str:
         aware = value.replace(tzinfo=value.tzinfo or UTC)
-        return aware.astimezone(ZoneInfo(timezone_name)).strftime(
-            "%A, %d %B %Y at %I:%M %p %Z"
-        )
+        return aware.astimezone(ZoneInfo(timezone_name)).strftime("%A, %d %B %Y at %I:%M %p %Z")
 
     def students(self, db: Session, assignment: Assignment) -> list[User]:
         return list(
             db.scalars(
                 select(User)
                 .join(AssignmentTarget, AssignmentTarget.student_id == User.id)
-                .where(AssignmentTarget.assignment_id == assignment.id)
+                .join(ClassMembership, ClassMembership.user_id == User.id)
+                .where(
+                    AssignmentTarget.assignment_id == assignment.id,
+                    ClassMembership.classroom_id == assignment.classroom_id,
+                    ClassMembership.role == "student",
+                )
             )
         )
 
@@ -86,15 +96,17 @@ class NotificationService:
         )
         deliveries = []
         for student in self.students(db, assignment):
-            deliveries.append(self._send(
-                db,
-                assignment,
-                student,
-                "assignment_created",
-                body,
-                f"assignment-created:{assignment.id}:{student.id}",
-                buttons=True,
-            ))
+            deliveries.append(
+                self._send(
+                    db,
+                    assignment,
+                    student,
+                    "assignment_created",
+                    body,
+                    f"assignment-created:{assignment.id}:{student.id}",
+                    buttons=True,
+                )
+            )
         return deliveries
 
     def notify_deadline_changed(

@@ -1,20 +1,25 @@
 {% extends "base.html" %}
-{% from "components.html" import assignment_badge, delivery_badge, delivery_help, field_error, invalid %}
+{% from "components.html" import assignment_badge, delivery_badge, delivery_help, feedback_note, field_error, invalid, submission_work, teacher_class_nav %}
 {% block content %}
-<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/teacher?class_id={{ classroom.id }}">Classwork</a><span aria-hidden="true">/</span><a href="/teacher/classes/{{ classroom.id }}">{{ classroom.name }}</a></nav>
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  {% if workspace == 'coordinator' %}<a href="/coordinator?school_id={{ school.id }}">{{ school.name }}</a><span aria-hidden="true">/</span><a href="/coordinator/classes/{{ classroom.id }}/work">{{ classroom.name }} classwork</a>
+  {% else %}<a href="/teacher">Your classes</a><span aria-hidden="true">/</span><a href="/teacher?class_id={{ classroom.id }}">{{ classroom.name }}</a>{% endif %}
+</nav>
 <header class="hero assignment-hero workspace-hero">
   <div>
-    <p class="eyebrow">{{ classroom.name }}</p>
+    <p class="eyebrow">{{ classroom.name }} · {{ classroom.grade }}</p>
     <h1>{{ assignment.title }}</h1>
     <strong class="due-line">Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</strong>
   </div>
-  <div class="actions">{{ assignment_badge(assignment.status) }}{% if reviewable %}<a href="#review" class="primary button-link">Review {{ reviewable|length }} {{ 'submission' if reviewable|length == 1 else 'submissions' }}</a>{% elif assignment.status == "assigned" %}<a href="#edit-details" class="primary button-link">Edit assignment</a>{% endif %}</div>
+  <div class="actions">{{ assignment_badge(assignment.status) }}{% if reviewable %}<a href="#review" class="primary button-link">Review {{ reviewable|length }} {{ 'submission' if reviewable|length == 1 else 'submissions' }}</a>{% elif assignment.status == "assigned" and not classroom.archived_at %}<a href="#edit-details" class="primary button-link">Edit assignment</a>{% endif %}</div>
 </header>
+{% if workspace == 'teacher' %}{{ teacher_class_nav(classroom) }}{% endif %}
+{% if classroom.archived_at %}<p class="notice">This class is archived. Classwork and feedback are read-only.</p>{% endif %}
 
 <nav class="section-links" aria-label="Assignment sections">
   <a href="#instructions">Instructions &amp; recipients</a>
   {% if assignment.status != "draft" %}<a href="#review">Submissions</a><a href="#student-status">Student status</a><a href="#notifications">Notifications</a>{% endif %}
-  {% if assignment.status != "cancelled" %}<a href="#edit-details">Edit &amp; cancel</a>{% endif %}
+  {% if assignment.status != "cancelled" and not classroom.archived_at %}<a href="#edit-details">Edit &amp; cancel</a>{% endif %}
 </nav>
 
 <section class="card" id="instructions" aria-labelledby="instructions-title">
@@ -22,11 +27,12 @@
   <p class="preserve-lines">{{ assignment.instructions }}</p>
   <dl class="details-grid">
     <div><dt>Class</dt><dd>{{ classroom.name }}</dd></div>
+    <div><dt>Created by</dt><dd>{{ author.name }}</dd></div>
     <div><dt>Deadline</dt><dd>{{ assignment.due_at|local_deadline(assignment.timezone) }}</dd></div>
     <div><dt>Recipients ({{ recipients|length }})</dt><dd>{{ recipients|map(attribute='name')|join(', ') or "No recipients" }}</dd></div>
   </dl>
-  {% if assignment.status == "draft" %}
-  <form class="section-divider stack" method="post" action="/teacher/assignments/{{ assignment.id }}/publish#instructions">
+  {% if assignment.status == "draft" and not classroom.archived_at %}
+  <form class="section-divider stack" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/publish#instructions">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     {% if errors.get('publish') %}<div class="error" role="alert">{{ errors.publish }} <a href="#edit-details">Edit draft details</a></div>{% endif %}
     <p class="field-hint">Publishing makes the assignment visible to these students, queues Telegram notifications for linked accounts, and schedules reminders.</p>
@@ -48,40 +54,20 @@
       <div><h3>{{ student_names.get(submission.student_id, "Student") }}</h3><p class="muted">Submitted {{ submission.created_at|local_deadline(assignment.timezone) }}</p></div>
       {% if needs_feedback %}<span class="badge needs_revision">Awaiting review</span>{% endif %}
     </header>
-    {% if submission.text_content %}<p class="preserve-lines work-content">{{ submission.text_content }}</p>{% endif %}
-    {% if submission.stored_file_path %}
-      {% set file_url = '/submissions/' ~ submission.id ~ '/file' %}
-      <div class="submission-file">
-        <p><strong>{{ submission.original_filename or 'Submitted file' }}</strong></p>
-        {% if submission.mime_type in inline_image_types %}
-        <a href="{{ file_url }}" aria-label="Open image preview for {{ submission.original_filename or 'submitted work' }}"><img class="submission-preview" src="{{ file_url }}" alt="Submitted work from {{ student_names.get(submission.student_id, 'the student') }}" loading="lazy"></a>
-        {% endif %}
-        <div class="actions">
-          {% if submission.mime_type in inline_image_types %}<a class="ghost-button button-link" href="{{ file_url }}">Open image preview</a>{% endif %}
-          <a class="ghost-button button-link" href="{{ file_url }}?download=true">Download file</a>
-        </div>
-      </div>
-    {% elif not submission.text_content %}<p class="notice">This submission has no available file. Ask the student to attach it again if needed.</p>{% endif %}
+    <p><a href="/{{ workspace }}/submissions/{{ submission.id }}">Open submission details</a></p>
+    {{ submission_work(submission, workspace, student_names.get(submission.student_id, 'the student'), inline_image_types) }}
 
     {% for review in feedback if review.submission_id == submission.id %}
     {% set outcome = feedback_outcomes.get(review.id) %}
     {% set delivery = delivery_keys.get('feedback:' ~ (review.idempotency_key or review.id)) %}
-    <div class="review-feedback">
-      <div class="section-head"><h4>{{ 'Marked complete' if outcome is sameas true else 'Revision requested' if outcome is sameas false else 'Feedback saved' }}</h4><span class="tiny">{{ review.created_at|local_deadline(assignment.timezone) }}</span></div>
-      <p class="preserve-lines">{{ review.message }}</p>
-      <div class="delivery-line">
-        <strong>Telegram delivery</strong>
-        {% if delivery %}{{ delivery_badge(delivery.status) }}<span>{{ delivery_help(delivery.status, delivery.error != 'User has not linked Telegram') }}</span>
-        {% else %}<span>No delivery record.</span>{% endif %}
-      </div>
-    </div>
+    {{ feedback_note(review, feedback_authors.get(review.teacher_id, 'Staff'), outcome, assignment.timezone, delivery, true) }}
     {% endfor %}
 
     {% if failed_feedback and not needs_feedback %}
     <div class="error" role="alert">{{ errors.feedback }} Copy your unsaved note below and open the latest submission.</div>
     <label>Unsaved feedback <textarea readonly>{{ form.feedback }}</textarea></label>
     {% elif needs_feedback %}
-    <form method="post" action="/teacher/submissions/{{ submission.id }}/feedback#submission-{{ submission.id }}" class="stack section-divider">
+    <form method="post" action="/{{ workspace }}/submissions/{{ submission.id }}/feedback#submission-{{ submission.id }}" class="stack section-divider" data-guard-unsaved {% if failed_feedback %}data-unsaved{% endif %}>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="idempotency_key" value="{{ form.feedback_key if failed_feedback else feedback_keys[submission.id] }}">
       <label for="feedback-{{ submission.id }}">Feedback for {{ student_names.get(submission.student_id, 'the student') }}
@@ -109,11 +95,11 @@
 </section>
 {% endif %}
 
-{% if assignment.status != "cancelled" %}
+{% if assignment.status != "cancelled" and not classroom.archived_at %}
 <section class="card" id="edit-details" aria-labelledby="edit-title">
   <h2 id="edit-title">Edit assignment details</h2>
   <div class="form-grid">
-    <form class="stack edit-panel" method="post" action="/teacher/assignments/{{ assignment.id }}/deadline#edit-details">
+    <form class="stack edit-panel" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/deadline#edit-details" data-guard-unsaved {% if errors.get('due_at') %}data-unsaved{% endif %}>
       <h3>Deadline</h3>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="idempotency_key" value="{{ form.get('deadline_key', deadline_key) }}">
@@ -124,7 +110,7 @@
       <p class="field-hint">{{ 'Changing a published deadline replaces future reminders and queues a deadline update.' if assignment.status == 'assigned' else 'Reminders will be scheduled using this deadline when you publish.' }}</p>
       <div class="actions"><button class="ghost-button">Update deadline</button></div>
     </form>
-    <form class="stack edit-panel" method="post" action="/teacher/assignments/{{ assignment.id }}/instructions#edit-details">
+    <form class="stack edit-panel" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/instructions#edit-details" data-guard-unsaved {% if errors.get('instructions') %}data-unsaved{% endif %}>
       <h3>Instructions</h3>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="idempotency_key" value="{{ form.get('instructions_key', instructions_key) }}">
@@ -134,7 +120,7 @@
   </div>
   <details class="disclosure-inline section-divider">
     <summary>{{ 'Cancel draft' if assignment.status == 'draft' else 'Cancel assignment' }}</summary>
-    <form class="stack" method="post" action="/teacher/assignments/{{ assignment.id }}/cancel">
+    <form class="stack" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/cancel">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="idempotency_key" value="{{ cancel_key }}">
       <p class="field-hint">{{ 'The draft will close without sending notifications.' if assignment.status == 'draft' else 'Students will no longer be able to submit. Future reminders stop, and linked students receive a cancellation notice.' }}</p>
@@ -174,3 +160,4 @@
 </div>
 {% endif %}
 {% endblock %}
+{% block scripts %}<script src="{{ url_for('static', path='/js/unsaved.js') }}" defer></script>{% endblock %}

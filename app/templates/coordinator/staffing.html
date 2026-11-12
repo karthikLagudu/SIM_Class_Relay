@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/coordinator?school_id={{ school.id }}">{{ school.name }}</a><span aria-hidden="true">/</span><a href="{{ back_url }}">{{ classroom.name if classroom else teachers[plan.teacher_id].name }}</a></nav>
+<header class="hero compact-hero workspace-hero"><div><p class="eyebrow">{{ school.name }}</p><h1>Confirm teaching assignments</h1>{% if plan.revoke %}<p>{{ teachers[plan.teacher_id].name }} will lose teaching access across this school. Other roles and classroom history are preserved.</p>{% endif %}</div></header>
+<section class="card stack" aria-label="Staffing changes">
+  {% for change in plan.changes %}
+  <article class="staffing-change">
+    <h2>{{ classes[change.class_id].name }}</h2>
+    <p>{{ change.student_count }} enrolled · {{ change.review_count }} awaiting review</p>
+    <dl class="details-grid team-comparison">
+      <div><dt>Current teaching team</dt><dd>{% for id in change.current %}{{ teachers[id].name }}{% if not loop.last %}, {% endif %}{% else %}Unassigned{% endfor %}</dd></div>
+      <div><dt>Proposed teaching team</dt><dd>{% for id in change.proposed %}{{ teachers[id].name }}{% if not loop.last %}, {% endif %}{% else %}Unassigned{% endfor %}</dd></div>
+    </dl>
+    {% if not change.proposed %}<p class="notice">This class will have no assigned teacher. A coordinator can cover its work.</p>{% endif %}
+  </article>
+  {% else %}<p>{{ 'No class memberships will change.' if plan.revoke else 'The teaching assignments are already up to date.' }}</p>{% endfor %}
+  <div class="actions">
+    {% if plan.changes or plan.revoke %}
+    <form method="post" action="/coordinator/staffing/confirm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="plan_token" value="{{ token }}">
+      <button class="{{ 'danger-button' if plan.revoke else 'primary' }}">{{ 'Remove teaching access' if plan.revoke else 'Save teaching assignments' }}</button>
+    </form>
+    {% endif %}
+    <a class="ghost-button button-link" href="{{ back_url }}">{{ 'Cancel' if plan.changes or plan.revoke else 'Back' }}</a>
+  </div>
+</section>
+{% endblock %}

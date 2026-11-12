@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% from "components.html" import feedback_note, review_badge, submission_work %}
+{% block content %}
+{% set attempt_url = '/' ~ workspace ~ '/submissions/' %}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  {% if workspace == 'coordinator' %}
+  <a href="/coordinator?school_id={{ school.id }}">{{ school.name }}</a><span aria-hidden="true">/</span>
+  <a href="/coordinator/submissions?school_id={{ school.id }}">School submissions</a>
+  {% else %}
+  <a href="/teacher">Your classes</a><span aria-hidden="true">/</span>
+  <a href="/teacher/submissions?class_id={{ classroom.id }}">Needs review</a>
+  {% endif %}
+  <span aria-hidden="true">/</span><a href="{{ assignment|assignment_path(workspace) }}">{{ assignment.title }}</a>
+</nav>
+<header class="hero compact-hero workspace-hero">
+  <div><p class="eyebrow">{{ school.name }} · {{ classroom.name }}</p>
+    <h1>{{ selected.student_name }}’s submission</h1>
+    <p>{{ assignment.title }} · {{ classroom.grade }}</p>
+    <p>Attempt {{ attempt_number }} · Submitted {{ submission.created_at|local_deadline(assignment.timezone) }}</p>
+  </div>
+  <div class="actions">{{ review_badge(selected.review_status) }}<span class="badge">{{ 'Latest attempt' if selected.latest else 'Earlier attempt' }}</span></div>
+</header>
+{% if not selected.latest %}<p class="notice">You’re viewing an earlier attempt. <a href="{{ attempt_url }}{{ attempts[0].id }}">Open the latest attempt</a>.</p>{% endif %}
+
+<div class="grid two-one submission-detail">
+  <section class="card" aria-labelledby="work-title">
+    <h2 id="work-title">Submitted work</h2>
+    {{ submission_work(submission, workspace, selected.student_name, inline_image_types) }}
+    <section class="section-divider" aria-labelledby="review-heading">
+      <h3 id="review-heading">Review</h3>
+      {% if error %}<p class="error" id="feedback-error" role="alert">{{ error }}</p>{% endif %}
+      {% if selected.review_status == 'awaiting' %}
+      <form method="post" action="{{ attempt_url }}{{ submission.id }}/feedback#review-heading" class="stack" data-guard-unsaved {% if error %}data-unsaved{% endif %}>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="idempotency_key" value="{{ feedback_key }}">
+        <input type="hidden" name="from_detail" value="true">
+        <label>Feedback<textarea name="message" rows="4" maxlength="5000" required {% if error %}aria-describedby="feedback-error" aria-invalid="true"{% endif %}>{{ draft_feedback }}</textarea></label>
+        <p class="field-hint">Request revision to let the student submit a new attempt. Mark complete when the work is finished.</p>
+        <div class="actions"><button class="ghost-button" name="outcome" value="revision">Request revision</button><button class="primary" name="outcome" value="complete">Mark complete</button></div>
+      </form>
+      {% elif error %}
+      <label>Unsaved feedback <textarea readonly>{{ draft_feedback }}</textarea></label>
+      {% elif selected.review_status == 'revision' and selected.latest %}
+      <p>The student can resubmit after reading the feedback.</p>
+      {% elif selected.review_status == 'closed' %}
+      <p>This attempt is available to read. It is closed to review.</p>
+      {% endif %}
+    </section>
+    <section class="section-divider" aria-labelledby="review-feedback-title">
+      <h3 id="review-feedback-title">Feedback history</h3>
+      {% for review, reviewer in feedback %}
+      {% set delivery = delivery_keys.get('feedback:' ~ (review.idempotency_key or review.id)) %}
+      {% if review.submission_id != submission.id %}<p class="tiny"><a href="{{ attempt_url }}{{ review.submission_id }}">Open the attempt for this feedback</a></p>{% endif %}
+      {{ feedback_note(review, reviewer, feedback_outcomes.get(review.id), assignment.timezone, delivery, true) }}
+      {% else %}<p class="empty">No feedback recorded yet.</p>{% endfor %}
+    </section>
+  </section>
+  <div class="stack">
+    <section class="card" aria-labelledby="instructions-title">
+      <h2 id="instructions-title">{{ 'Assignment instructions at submission' if submission.instructions_at_submission is not none else 'Assignment instructions' }}</h2>
+      <div class="preserve-lines work-content">{{ submission.instructions_at_submission if submission.instructions_at_submission is not none else assignment.instructions }}</div>
+      {% if submission.instructions_at_submission is none %}<p class="field-hint">This earlier submission shows the current assignment instructions.</p>{% endif %}
+    </section>
+    <section class="card" aria-labelledby="attempt-history">
+      <h2 id="attempt-history">Submission history</h2>
+      <div class="list">
+        {% for attempt in attempts %}
+        <a class="list-row submission-row" href="{{ attempt_url }}{{ attempt.id }}" {% if attempt.id == submission.id %}aria-current="page"{% endif %}>
+          <div><strong>Attempt {{ loop.revindex }}{% if attempt.latest %} · Latest{% endif %}</strong><span>{{ attempt.created_at|local_deadline(assignment.timezone) }}</span></div>
+          {{ review_badge(attempt.review_status) }}
+        </a>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', path='/js/unsaved.js') }}" defer></script>{% endblock %}

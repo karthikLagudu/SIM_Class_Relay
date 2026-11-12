@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.exceptions import AuthorizationError, NotFoundError, TelegramLinkError, ValidationError
 from app.models import ClassMembership, Classroom, SchoolMembership, TelegramLinkToken, User
-from app.services.authorization import require_teacher_class
+from app.services.authorization import require_managed_class, require_teacher_class
 
 
 def aware_utc(value: datetime) -> datetime:
@@ -39,7 +39,7 @@ class TelegramLinkService:
     def _student_for_class(
         db: Session, actor: User, classroom_id: int, student_id: int
     ) -> tuple[Classroom, User]:
-        classroom = require_teacher_class(db, actor, classroom_id)
+        classroom = require_managed_class(db, actor, classroom_id)
         student = db.scalar(
             select(User)
             .join(ClassMembership, ClassMembership.user_id == User.id)
@@ -53,9 +53,7 @@ class TelegramLinkService:
             raise AuthorizationError("Resource is outside your authorized scope")
         return classroom, student
 
-    def revoke_active_tokens(
-        self, db: Session, user_id: int, now: datetime | None = None
-    ) -> int:
+    def revoke_active_tokens(self, db: Session, user_id: int, now: datetime | None = None) -> int:
         current = aware_utc(now or datetime.now(UTC))
         rows = list(
             db.scalars(
@@ -178,8 +176,22 @@ class TelegramLinkService:
             if classroom
             else None
         )
-        if not student or not classroom or not (is_teacher_link or (membership and school_membership)):
-            raise TelegramLinkError("This student can no longer use this connection link.", "invalid")
+        if (
+            not student
+            or not classroom
+            or classroom.archived_at
+            or not (is_teacher_link or (membership and school_membership))
+        ):
+            raise TelegramLinkError(
+                "This student can no longer use this connection link.", "invalid"
+            )
+        issuer = db.get(User, token.created_by_user_id)
+        if not issuer:
+            raise TelegramLinkError("Please request a new connection link.", "invalid")
+        try:
+            require_managed_class(db, issuer, classroom.id)
+        except (AuthorizationError, NotFoundError) as exc:
+            raise TelegramLinkError("Please request a new connection link.", "invalid") from exc
         other = db.scalar(
             select(User).where(
                 User.id != student.id,

@@ -29,10 +29,10 @@ from app.services.assignment import AssignmentService
 from app.services.notification import NotificationService
 from app.services.reminder import ReminderService
 from app.services.telegram_link import TelegramLinkService
-from app.status_labels import delivery_status, student_status
+from app.status_labels import delivery_status, review_status, student_status
 from app.telegram.client import TelegramClient
 from app.telegram.service import TelegramService
-from app.web.helpers import local_input, render
+from app.web.helpers import assignment_path, local_input, render
 from app.web.router import router as web_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -67,10 +67,12 @@ def create_app() -> FastAPI:
     app.state.sessions = SessionManager(settings)
     app.state.templates = Jinja2Templates(directory="app/templates")
     app.state.templates.env.filters.update(
+        assignment_path=assignment_path,
         local_deadline=NotificationService.format_deadline,
         local_input=local_input,
         student_status=student_status,
         delivery_status=delivery_status,
+        review_status=review_status,
     )
     app.state.llm_service = LLMService(provider, settings.llm_confidence_threshold)
     app.state.telegram_client = telegram_client
@@ -122,7 +124,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(AuthorizationError)
     async def authorization_error(_request: Request, _exc: AuthorizationError):
         logger.info("authorization_denied")
-        return browser_error(_request, 403, "This class or work belongs to another account.") or JSONResponse(
+        return browser_error(_request, 403, "Your current workspace doesn’t have access to this school, class, or work. Return to a workspace you can use.") or JSONResponse(
             status_code=403, content={"detail": "Resource is outside your authorized scope"}
         )
 

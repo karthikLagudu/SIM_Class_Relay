@@ -5,7 +5,7 @@
   <p>{{ detail }}</p>
   <div class="actions">
     {% if code == 401 %}<a class="primary button-link" href="/login">Sign in</a>
-    {% else %}<a class="primary button-link" href="/">Go to my workspace</a>{% if code == 403 %}<a class="ghost-button button-link" href="/login">Sign in with another account</a>{% endif %}{% endif %}
+    {% else %}{% if workspace or not user %}<a class="primary button-link" href="{{ recovery_url|default('/coordinator?school_id=' ~ school.id if workspace == 'coordinator' and school else '/' ~ workspace if workspace else '/') }}">{{ recovery_label|default('Go to my workspace') }}</a>{% endif %}{% if code == 403 %}<a class="ghost-button button-link" href="/login">Sign in with another account</a>{% endif %}{% endif %}
   </div>
 </section>
 {% endblock %}

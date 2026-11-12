@@ -8,12 +8,10 @@ from sqlalchemy.orm import Session
 from app.exceptions import AmbiguousReferenceError, NotFoundError
 from app.models import (
     Assignment,
-    AssignmentTarget,
-    ClassMembership,
     StudentAssignmentState,
     User,
 )
-from app.services.authorization import teacher_class_scope
+from app.services.authorization import student_work_scope, teacher_class_scope
 
 
 def normalize(value: str) -> str:
@@ -82,13 +80,9 @@ class AssignmentReferenceService:
         return list(
             db.scalars(
                 select(Assignment)
-                .join(AssignmentTarget, AssignmentTarget.assignment_id == Assignment.id)
-                .join(ClassMembership, ClassMembership.classroom_id == Assignment.classroom_id)
                 .join(StudentAssignmentState, StudentAssignmentState.assignment_id == Assignment.id)
                 .where(
-                    AssignmentTarget.student_id == actor.id,
-                    ClassMembership.user_id == actor.id,
-                    ClassMembership.role == "student",
+                    Assignment.id.in_(student_work_scope(actor.id)),
                     StudentAssignmentState.student_id == actor.id,
                     StudentAssignmentState.status.not_in(["completed", "cancelled"]),
                     Assignment.status == "assigned",

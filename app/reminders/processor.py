@@ -9,7 +9,16 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.llm.base import LLMProvider
-from app.models import Assignment, LLMInteraction, Reminder, School, StudentAssignmentState, User
+from app.models import (
+    Assignment,
+    ClassMembership,
+    Classroom,
+    LLMInteraction,
+    Reminder,
+    School,
+    StudentAssignmentState,
+    User,
+)
 from app.reminders.policy import (
     FINAL_STATES,
     aware_utc,
@@ -52,9 +61,17 @@ class ReminderProcessor:
                 & (StudentAssignmentState.student_id == Reminder.student_id),
             )
             .join(User, User.id == Reminder.student_id)
+            .join(Classroom, Classroom.id == Assignment.classroom_id)
+            .join(
+                ClassMembership,
+                (ClassMembership.classroom_id == Classroom.id)
+                & (ClassMembership.user_id == Reminder.student_id)
+                & (ClassMembership.role == "student"),
+            )
             .join(School, School.id == Assignment.school_id)
             .where(
                 Reminder.status.in_(["pending", "deferred"]),
+                Classroom.archived_at.is_(None),
                 Reminder.processed_at.is_(None),
                 or_(
                     Reminder.scheduled_for <= now,
@@ -122,7 +139,9 @@ class ReminderProcessor:
                 )
             else:
                 duplicate = duplicate.where(
-                    Reminder.reminder_type.in_(["silent_due_soon", "gentle_due_soon", "due_within_2h", "revision_due_soon"]),
+                    Reminder.reminder_type.in_(
+                        ["silent_due_soon", "gentle_due_soon", "due_within_2h", "revision_due_soon"]
+                    ),
                     Reminder.processed_at >= now - timedelta(hours=1),
                 )
             if db.scalar(duplicate.limit(1)):
@@ -137,10 +156,12 @@ class ReminderProcessor:
                 "state": state.status,
                 "reason": decision.reason,
                 "blocker": state.block_reason or "",
-                "time_remaining_minutes": str(round((aware_utc(assignment.due_at) - now).total_seconds() / 60)),
-                "due": assignment.due_at.replace(
-                    tzinfo=assignment.due_at.tzinfo or UTC
-                ).astimezone(ZoneInfo(school.timezone)).strftime("%d %b %Y, %I:%M %p %Z"),
+                "time_remaining_minutes": str(
+                    round((aware_utc(assignment.due_at) - now).total_seconds() / 60)
+                ),
+                "due": assignment.due_at.replace(tzinfo=assignment.due_at.tzinfo or UTC)
+                .astimezone(ZoneInfo(school.timezone))
+                .strftime("%d %b %Y, %I:%M %p %Z"),
             }
             try:
                 body = self.llm.write_reminder(str(decision.reminder_type), facts).strip()
@@ -157,7 +178,9 @@ class ReminderProcessor:
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - provider failures use deterministic fallback
-                logger.warning("llm_failed operation=reminder_wording assignment_id=%s", assignment.id)
+                logger.warning(
+                    "llm_failed operation=reminder_wording assignment_id=%s", assignment.id
+                )
                 if decision.reminder_type == "blocked_support":
                     body = f"Need a hand with {assignment.title}? Reply with the part that's holding you up."
                 elif decision.reminder_type == "overdue":
@@ -195,7 +218,10 @@ class ReminderProcessor:
             db.flush()  # Later jobs in the same batch must see the delivery we just attempted.
             logger.info(
                 "reminder_%s assignment_id=%s student_id=%s kind=%s",
-                reminder.status, assignment.id, student.id, reminder.reminder_type,
+                reminder.status,
+                assignment.id,
+                student.id,
+                reminder.reminder_type,
             )
             processed.append(reminder)
         return processed

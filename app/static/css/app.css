@@ -1,4 +1,7 @@
 :root {
+  --brand-navy: #0b2545;
+  --brand-teal: #187070;
+  --brand-wash: #e5f0f1;
   --ink: #17211d;
   --muted: #66756f;
   --paper: #f4f1ea;
@@ -58,20 +61,51 @@ a {
   display: inline-flex;
   align-items: center;
   min-height: 44px;
-  gap: 0.25em;
-  color: var(--ink);
+  gap: 6px;
+  color: var(--brand-navy);
   text-decoration: none;
   font-weight: 850;
+  white-space: nowrap;
 }
 
 .brand strong {
-  color: var(--green);
+  color: var(--brand-teal);
+}
+.brand-mark { display: block; flex: none; border-radius: 20%; }
+
+.workspace-label { flex: none; }
+.workspace-navigation { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.current-class {
+  min-width: 0;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--green-ink);
+  font-size: 13px;
+  font-weight: 720;
+}
+.workspace-switcher { display: flex; flex-wrap: wrap; gap: 4px; }
+.workspace-switcher a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 720;
+}
+.workspace-switcher a[aria-current="page"], .section-links a[aria-current="location"] {
+  background: var(--mint);
+  color: var(--green-ink);
+  text-decoration: none;
 }
 
 .account {
   display: flex;
   align-items: center;
   gap: 14px;
+  margin-inline-start: auto;
 }
 
 .account form {
@@ -103,8 +137,7 @@ a {
   font-size: 13px;
 }
 
-.site-footer > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; }
-.site-footer strong { color: var(--green-ink); }
+.site-footer strong { color: var(--brand-navy); }
 
 .hero {
   display: flex;
@@ -788,25 +821,47 @@ a.list-row:hover {
   display: grid;
   align-content: center;
   justify-items: start;
-  padding: clamp(20px, 4vw, 42px);
+  padding: clamp(20px, 3vw, 34px);
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--surface), var(--mint));
+  background: linear-gradient(135deg, var(--surface), var(--brand-wash));
 }
 
-.login-copy h1 span { display: block; margin-top: 12px; color: var(--green-ink); font-size: 0.49em; }
+.login-copy h1 { color: var(--brand-navy); }
+.login-company-logo {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 8px;
+  border-radius: 8px;
+}
+.login-brand-compact { display: none; }
 .login-copy p {
   max-width: 34ch;
   margin: 12px 0 0;
   color: var(--muted);
   font-size: 16px;
 }
-
-.demo-link { display: inline-flex; align-items: center; min-height: 44px; font-weight: 720; }
+.login-company-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--brand-navy);
+  font-size: clamp(16px, 3vw, 20px);
+  line-height: 1.2;
+}
+.login-copy .login-tagline {
+  max-width: none;
+  margin: 6px 0 0;
+  color: var(--brand-navy);
+  font-size: 14px;
+  font-style: italic;
+}
 
 .login-card {
   padding: 32px;
 }
+.login-card .primary { background: var(--brand-teal); }
 
 .back {
   display: inline-flex;
@@ -997,7 +1052,6 @@ button:disabled {
   --control-line: #888378;
 }
 
-html { scroll-padding-top: 96px; }
 body { overflow-wrap: anywhere; }
 .shell { padding-top: 28px; }
 .shell > .card + .card,
@@ -1165,8 +1219,8 @@ button, .primary, .ghost-button, .danger-button, .button-link { min-height: 44px
 }
 .form-grid > * { min-width: 0; }
 .details-grid { padding: 14px; background: var(--paper); border-radius: 8px; margin: 14px 0 0; }
-.details-grid dt, .demo-accounts dt { color: var(--muted); font-size: 13px; font-weight: 750; }
-.details-grid dd, .demo-accounts dd { margin: 2px 0 0; }
+.details-grid dt { color: var(--muted); font-size: 13px; font-weight: 750; }
+.details-grid dd { margin: 2px 0 0; }
 .field-hint, .mode-note { font-size: 13px; color: var(--muted); }
 .field-error { color: #812d25; font-size: 13px; font-weight: 720; }
 .stack > .field-hint { margin: -5px 0 0; }
@@ -1193,6 +1247,20 @@ button, .primary, .ghost-button, .danger-button, .button-link { min-height: 44px
 .section-divider { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
 .preserve-lines { white-space: pre-wrap; }
 .work-content { padding: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.work-content, .submission-file, .review-feedback, #submission-history { overflow-wrap: anywhere; }
+.submission-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.submission-filters label { min-width: 0; }
+.submission-filters .actions { grid-column: 1 / -1; }
+.submission-row[aria-current="page"] { border-radius: 6px; background: var(--mint); padding-inline: 10px; }
+.submission-detail { align-items: start; }
+.submission-detail > * { min-width: 0; }
+.file-name { font-weight: 550; }
 .edit-panel, .review-card { padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
 .review-card { background: var(--surface); margin-top: 14px; }
 .review-feedback { background: var(--paper); border-radius: 8px; padding: 13px; margin: 12px 0; }
@@ -1205,11 +1273,74 @@ button, .primary, .ghost-button, .danger-button, .button-link { min-height: 44px
 .class-row:last-child { border-bottom: 0; padding-bottom: 0; }
 .class-row p { color: var(--muted); }
 .demo-card { grid-column: 1 / -1; }
+.demo-card > section { margin-top: 16px; }
 .demo-card .section-head h2, .demo-card .section-head p { margin: 0; }
-.demo-accounts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(10rem,100%), 1fr)); gap: 12px; }
-.demo-accounts > div { background: var(--paper); border-radius: 6px; padding: 10px 12px; }
-.demo-accounts:last-child { margin-bottom: 0; }
-.demo-accounts code { font-size: 13px; }
+.demo-role-filters { gap: 6px; }
+.demo-role-filters button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--green-ink);
+  padding-inline: 10px;
+  text-decoration: underline;
+}
+.demo-role-filters button:hover { background: var(--paper); }
+.demo-role-filters button[aria-pressed="true"] {
+  background: var(--mint);
+  border-color: var(--green);
+  text-decoration: none;
+}
+.demo-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  max-width: 36rem;
+  margin: 4px 0 8px;
+}
+.demo-search .field-hint { grid-column: 1 / -1; margin: 0; }
+.demo-empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--paper);
+}
+.demo-empty[hidden], .demo-accounts > li[hidden] { display: none; }
+.demo-group { margin-top: 18px; }
+.demo-accounts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 12px;
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+.demo-accounts > li {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--paper);
+}
+.demo-accounts code { font-size: 13px; overflow-wrap: anywhere; }
+.demo-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.demo-access { margin: 0 0 6px; padding: 0; list-style: none; color: var(--muted); font-size: 14px; }
+.demo-accounts button { align-self: flex-start; margin-top: auto; }
+
+.directory-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 14px; }
+.staff-directory-entry { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+.staff-class-list { margin: 8px 0; padding-inline-start: 1.15rem; }
+.staff-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.shell > .staff-metrics { margin: 0 0 16px; }
+.staffing-change + .staffing-change { padding-top: 12px; border-top: 1px solid var(--line); }
+.student-membership { grid-column: 1 / -1; }
+.directory-filter { align-items: flex-end; }
+.school-switcher { margin-bottom: 16px; }
+.school-totals { grid-template-columns: repeat(auto-fit, minmax(min(100%, 155px), 1fr)); margin: 0 0 16px; }
+.school-totals dd { font-weight: 800; }
+.topbar[data-workspace="coordinator"] .current-class { max-width: 44ch; }
 
 .student-task { padding: 0; overflow: clip; }
 .task-heading {
@@ -1228,13 +1359,35 @@ button, .primary, .ghost-button, .danger-button, .button-link { min-height: 44px
   .class-priorities { grid-template-columns: 1fr; }
 }
 
+@media (max-width: 960px) {
+  .login-company-logo { display: none; }
+  .login-brand-compact {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 10px;
+    border-radius: 8px;
+    background: white;
+  }
+}
+
 @media (max-width: 720px) {
-  html { scroll-padding-top: 70px; }
   .shell { padding-top: 18px; }
   .workspace-hero { padding: 18px; align-items: flex-start; gap: 13px; }
   .workspace-hero .actions { width: 100%; }
   .topbar { min-height: 56px; gap: 10px; padding: 5px 14px; }
+  .topbar:has(.workspace-navigation) { flex-wrap: wrap; row-gap: 2px; }
+  .workspace-navigation { flex-basis: 100%; min-height: 28px; justify-content: space-between; }
+  .topbar[data-workspace="coordinator"] .current-class {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    line-height: 1.25;
+  }
+  .workspace-switcher { flex: none; }
   .brand { font-size: 14px; }
+  .brand > .brand-mark { width: 26px; height: 26px; }
   .account { gap: 8px; }
   .account-name { max-width: 14ch; font-size: 12px; }
   .account button { padding-inline: 10px; }
@@ -1246,9 +1399,8 @@ button, .primary, .ghost-button, .danger-button, .button-link { min-height: 44px
   .scope-picker select { flex: 1; min-width: min(10rem,100%); }
   .card { padding: 17px; }
   .student-row { gap: 8px; }
-  .login-wrap { grid-template-columns: 1fr; gap: 12px; margin-top: 0; }
+  .login-wrap { grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 0; }
   .login-copy p { font-size: 15px; }
-  .login-copy h1 span { font-size: max(16px, 0.49em); }
   .student-task { padding: 0; }
   .task-content { grid-template-columns: 1fr; }
   .task-heading, .task-content > section { padding: 14px 16px; }
@@ -1258,4 +1410,10 @@ button, .primary, .ghost-button, .danger-button, .button-link { min-height: 44px
 
 @media (max-width: 520px) {
   .account-name { display: none; }
+  .demo-search input { grid-column: 1 / -1; }
+  .demo-search input::placeholder { font-size: 13px; }
+  .demo-search button { grid-area: 2 / 2; }
+  .demo-search .field-hint { grid-area: 2 / 1; align-self: center; }
+  .school-switcher select { flex-basis: 100%; width: 100%; }
+  .school-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

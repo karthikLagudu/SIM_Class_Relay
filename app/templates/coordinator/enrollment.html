@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/coordinator?school_id={{ school.id }}">{{ school.name }}</a><span aria-hidden="true">/</span><a href="/coordinator/classes/{{ classroom.id }}#students">{{ classroom.name }}</a></nav>
+<header class="hero compact-hero workspace-hero"><div><p class="eyebrow">{{ school.name }}</p><h1>{{ 'Confirm student transfer' if destination else 'Confirm end of enrollment' }}</h1><p>{{ student.name }} · {{ student.email }}</p></div></header>
+<section class="card stack" aria-label="Enrollment change">
+  <dl class="details-grid">
+    <div><dt>School</dt><dd>{{ school.name }}</dd></div>
+    <div><dt>Ending enrollment</dt><dd>{{ classroom.name }}</dd></div>
+    <div><dt>Destination</dt><dd>{{ destination.name if destination else 'No destination class' }}</dd></div>
+  </dl>
+  <p>Access to {{ classroom.name }} ends when you confirm. Existing submissions and feedback stay with that class. Other enrollments stay in place.</p>
+  <form method="post" action="/coordinator/classes/{{ classroom.id }}/students/{{ student.id }}/membership" class="actions">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="change_token" value="{{ token }}">
+    <button class="{{ 'primary' if destination else 'danger-button' }}">{{ 'Confirm transfer' if destination else 'End enrollment' }}</button>
+    <a class="ghost-button button-link" href="/coordinator/classes/{{ classroom.id }}#student-{{ student.id }}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

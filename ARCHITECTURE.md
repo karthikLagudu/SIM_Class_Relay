@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-- `app/web/auth.py`, `teacher.py`, `student.py`, `coordinator.py`, and `files.py` own HTTP/session/form concerns; `helpers.py` holds shared request helpers.
+- `app/web` owns HTTP, sessions, and forms. `classrooms.py` handles roster, invitation, and Telegram linking actions with separate coordinator and teacher route checks.
 - `app/telegram/service.py` validates and deduplicates update envelopes; `router.py` dispatches to `teacher.py` or `student.py`; `conversation.py` persists short-lived context; `files.py` confines downloads; `client.py` is the Bot API boundary.
 - `app/services` owns authorization, classes/invites, assignment mutations, reference resolution, progress, submissions/feedback, notifications, overdue transitions, risk scoring, and the state machine.
 - `app/reminders/scheduler.py` creates durable versioned jobs, `processor.py` re-reads state and executes them, `policy.py` chooses deterministic actions, and `worker.py` polls safely. `app/services/delivery.py` dispatches committed Bot API requests and records results.
@@ -62,7 +62,7 @@ The background worker passes no scope and is the system-wide actor. Web callers 
 
 `NotificationService` is the only assignment-related message boundary. Creation, deadline changes, instruction clarification, cancellation, feedback, and reminders all persist `NotificationDelivery` with `school_id`, `classroom_id`, `assignment_id`, recipient, status, body, idempotency key, attempts, and errors. An unlinked student is `skipped`; log mode is `logged`; real Bot API success is `sent`; failures are `failed` and receive bounded 1/5/15-minute retries.
 
-Teacher delivery queries are restricted to assigned class IDs; coordinators may also see school-scoped deliveries for their coordinator schools. External failure does not invalidate a correct domain mutation. The business transaction commits pending delivery intents and inline buttons. A short SQLite reservation claims one delivery, then the worker releases the lock before calling Telegram and records the result in a new transaction. A process restart retries expired claims. A crash after Telegram accepts a message and before the result commits can still produce a duplicate.
+Teacher delivery queries use assigned class IDs. Manual coordinator reminder runs use classes in the selected school. External failure does not invalidate a correct domain mutation. The business transaction commits pending delivery intents and inline buttons. A short SQLite reservation claims one delivery, then the worker releases the lock before calling Telegram and records the result in a new transaction. A process restart retries expired claims. A crash after Telegram accepts a message and before the result commits can still produce a duplicate.
 
 ## File flow
 

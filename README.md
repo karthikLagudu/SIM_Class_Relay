@@ -6,6 +6,8 @@ This checkout extends the existing `classroom-companion` repository at `d7665d7`
 
 ## Quick start
 
+For the full reviewer dataset with three schools and an isolated database, follow the [full demo setup](DEMO.md#full-reviewer-dataset).
+
 From the repository root on Windows with Python 3.12 or newer installed:
 
 ```powershell
@@ -13,10 +15,11 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 .\.venv\Scripts\python.exe -m scripts.seed
+$env:DEMO_MODE = 'true'
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --no-access-log
 ```
 
-On macOS or Linux use `.venv/bin/python` and `cp .env.example .env`. Run commands from the repository root so the scripts, templates, static assets, and `.env` resolve correctly. Open `http://127.0.0.1:8000` or check `GET /health`. The seed script initializes a fresh database and can be run again without duplicating the demo school. Startup also creates missing tables and applies additive upgrades. Use a fresh database to get the credentials below if you have demo data from an earlier revision.
+On macOS or Linux use `.venv/bin/python`, `cp .env.example .env`, and `export DEMO_MODE=true`. Run commands from the repository root so the scripts, templates, static assets, and `.env` resolve correctly. Open `http://127.0.0.1:8000` or check `GET /health`. The seed script initializes a fresh database and can be run again without duplicating the demo school. Startup also creates missing tables and applies additive upgrades. Use a fresh database to get the credentials below if you have demo data from an earlier revision.
 
 | Account | Email | Password |
 |---|---|---|
@@ -24,9 +27,10 @@ On macOS or Linux use `.venv/bin/python` and `cp .env.example .env`. Run command
 | Linked student in log mode | `student1@demo.local` | `Student123!` |
 | Unlinked student | `student2@demo.local` | `Student123!` |
 | Coordinator | `coordinator@demo.local` | `Coordinator123!` |
+| Teaching coordinator | `lead@demo.local` | `Coordinator123!` |
 | Teacher from another school | `teacher@northstar.demo.local` | `Teacher123!` |
 
-Grade 8 - A uses invite `CLASS8A`. Log mode seeds test Telegram IDs for the teacher and Student 1. For a live bot, configure real mode before seeding a fresh database and connect the two real accounts using their private links.
+Grade 8 - A uses invite `CLASS8A`. A fresh seed assigns the teacher and Student 1 to Grades 8 - A and 8 - B, and gives the teaching coordinator Grade 8 - C. Log mode seeds test Telegram IDs for the teacher and Student 1. For a live bot, configure real mode before seeding a fresh database and connect the two real accounts using their private links.
 
 ## Configuration
 
@@ -35,6 +39,7 @@ Grade 8 - A uses invite `CLASS8A`. Log mode seeds test Telegram IDs for the teac
 | `DATABASE_URL` | `sqlite:///./classroom_companion.db` |
 | `SESSION_SECRET` | Set a long random value for a shared deployment. Signs sessions and CSRF tokens. |
 | `ENVIRONMENT` | `development`. Use `production` behind HTTPS for secure cookies, required random session signing, and disabled demo seeding. |
+| `DEMO_MODE` | `false`. Set to `true` to show the login account picker on a seeded offline development server. |
 | `SCHOOL_TIMEZONE` | `Asia/Kolkata`, the default IANA timezone for school provisioning. |
 | `LLM_MODE` | `fake` for an offline demo. Set `real` to enable language understanding with OpenAI. |
 | `OPENAI_API_KEY` | Required in real LLM mode. |
@@ -129,7 +134,7 @@ stateDiagram-v2
     Cancelled --> [*]
 ```
 
-Coordinators inherit access to classes in their school. Teachers need class membership. Students see only their own targeted work and associated progress, files, reminders, and feedback. An invite permits an already-linked student to join within their school. It cannot link an arbitrary pre-created account. Initial linking uses the one-time private token issued in the authenticated UI. See [REASONING.md](REASONING.md) for state, authorization, and identity trade-offs.
+Coordinators manage classes, staffing, and classwork within their own school. The Teacher workspace and Telegram teaching commands require a teacher membership in the class. Students see only their own targeted work and associated progress, files, reminders, and feedback. An invite permits an already-linked student to join within their school. Initial linking uses the one-time private token issued in the authenticated UI. See [REASONING.md](REASONING.md) for state, authorization, and identity trade-offs.
 
 ### Time, reminders, and LLM boundary
 

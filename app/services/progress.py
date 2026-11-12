@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app.exceptions import ValidationError
-from app.models import ActivityEvent, ProgressEvent, User
+from app.models import ActivityEvent, Classroom, ProgressEvent, User
 from app.services.assignment import get_student_state
-from app.services.authorization import require_student_assignment
+from app.services.authorization import require_active_class, require_student_assignment
 from app.services.state_machine import transition
 
 
@@ -24,6 +24,7 @@ class ProgressService:
         if status not in {"acknowledged", "in_progress", "blocked"}:
             raise ValidationError("Choose acknowledged, in progress, or blocked")
         assignment = require_student_assignment(db, student, assignment_id)
+        require_active_class(db.get(Classroom, assignment.classroom_id))
         state = get_student_state(db, assignment_id, student.id)
         now = datetime.now(UTC)
         transition(state, status, now)

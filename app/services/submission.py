@@ -7,9 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.exceptions import ValidationError
-from app.models import ActivityEvent, Assignment, Feedback, Submission, User
+from app.models import ActivityEvent, Assignment, Classroom, Feedback, Submission, User
 from app.services.assignment import get_student_state
-from app.services.authorization import require_student_assignment, require_teacher_submission
+from app.services.authorization import (
+    require_active_class,
+    require_staff_submission,
+    require_student_assignment,
+)
 from app.services.notification import NotificationService
 from app.services.state_machine import transition
 
@@ -29,6 +33,7 @@ class SubmissionService:
         content: bytes | None = None,
     ) -> Submission:
         assignment = require_student_assignment(db, student, assignment_id)
+        require_active_class(db.get(Classroom, assignment.classroom_id))
         existing = db.scalar(
             select(Submission).where(Submission.idempotency_key == idempotency_key)
         )
@@ -38,18 +43,20 @@ class SubmissionService:
 
                 raise AuthorizationError("Idempotency key belongs to another operation")
             return existing
-        if text_content is not None:
-            text_content = text_content.strip()
+        if text_content is not None and not text_content.strip():
+            text_content = None
         if not text_content and not (telegram_file_id or stored_file_path):
             raise ValidationError("Include your work as text or a file")
         state = get_student_state(db, assignment_id, student.id)
         if state.status in {"submitted", "completed", "cancelled"}:
-            raise ValidationError("This assignment is no longer accepting a submission. A teacher can request revision.")
+            raise ValidationError(
+                "This assignment is no longer accepting a submission. A teacher can request revision."
+            )
         now = datetime.now(UTC)
         if state.status in {"assigned", "acknowledged"}:
             transition(state, "in_progress", now)
         transition(state, "submitted", now)
-        submission_type = "text" if text_content else "file"
+        submission_type = "file" if telegram_file_id or stored_file_path else "text"
         digest_input = (
             content if content is not None else (text_content or telegram_file_id or "").encode()
         )
@@ -58,6 +65,7 @@ class SubmissionService:
             student_id=student.id,
             submission_type=submission_type,
             text_content=text_content,
+            instructions_at_submission=assignment.instructions,
             telegram_file_id=telegram_file_id,
             stored_file_path=stored_file_path,
             original_filename=original_filename,
@@ -93,8 +101,12 @@ class FeedbackService:
         message: str,
         complete: bool = False,
         idempotency_key: str | None = None,
+        *,
+        coordinator: bool = False,
     ) -> Feedback:
-        submission = require_teacher_submission(db, teacher, submission_id)
+        submission = require_staff_submission(
+            db, teacher, submission_id, coordinator=coordinator, write=True
+        )
         if idempotency_key:
             existing = db.scalar(
                 select(Feedback).where(Feedback.idempotency_key == idempotency_key)
@@ -111,10 +123,15 @@ class FeedbackService:
         message = message.strip()
         if not message:
             raise ValidationError("Feedback cannot be empty")
-        latest_id = db.scalar(select(Submission.id).where(
-            Submission.assignment_id == submission.assignment_id,
-            Submission.student_id == submission.student_id,
-        ).order_by(Submission.id.desc()).limit(1))
+        latest_id = db.scalar(
+            select(Submission.id)
+            .where(
+                Submission.assignment_id == submission.assignment_id,
+                Submission.student_id == submission.student_id,
+            )
+            .order_by(Submission.id.desc())
+            .limit(1)
+        )
         state = get_student_state(db, submission.assignment_id, submission.student_id)
         if latest_id != submission.id or state.status != "submitted":
             raise ValidationError("Review the latest submission that is awaiting feedback")

@@ -1,6 +1,24 @@
 {% macro field_error(errors, key) -%}
   {% if errors.get(key) %}<span class="field-error" id="{{ key }}-error" role="alert">{{ errors[key] }}</span>{% endif %}
 {%- endmacro %}
+{% macro teacher_class_nav(classroom, section='') -%}
+  <nav class="section-links" aria-label="Class sections">
+    <a href="/teacher?class_id={{ classroom.id }}#assignments" {% if section == 'assignments' %}aria-current="location"{% endif %}>Assignments</a>
+    <a href="/teacher/classes/{{ classroom.id }}#students" {% if section == 'students' %}aria-current="location"{% endif %}>Students</a>
+    <a href="/teacher/submissions?class_id={{ classroom.id }}" {% if section == 'submissions' %}aria-current="location"{% endif %}>Submissions</a>
+  </nav>
+{%- endmacro %}
+{% macro teaching_class_picker(classes, classroom, action='/teacher', field='class_id', anchor='') -%}
+  {% if classes|length > 1 %}
+  <form class="scope-picker" method="get" action="{{ action }}{{ anchor }}">
+    <label for="active-class">Active class</label>
+    <select id="active-class" name="{{ field }}">
+      {% for item in classes %}<option value="{{ item.id }}" {% if item.id == classroom.id %}selected{% endif %}>{{ item.name }} · {{ item.grade }}</option>{% endfor %}
+    </select>
+    <button class="ghost-button">Switch class</button>
+  </form>
+  {% endif %}
+{%- endmacro %}
 {% macro invalid(errors, key) -%}
   {% if errors.get(key) %}aria-invalid="true" aria-describedby="{{ key }}-error"{% endif %}
 {%- endmacro %}
@@ -17,4 +35,40 @@
   {% elif status == "failed" %}Telegram did not confirm delivery. Check again after the next retry.
   {% elif status == "sent" %}Delivered to the linked Telegram chat.
   {% endif %}
+{%- endmacro %}
+{% macro review_badge(status) -%}
+  <span class="badge {{ {'awaiting':'pending', 'revision':'needs_revision', 'complete':'completed', 'feedback':'acknowledged', 'closed':'skipped'}[status] }}">{{ status|review_status }}</span>
+{%- endmacro %}
+{% macro submission_work(submission, workspace, student_name, inline_image_types) -%}
+  {% if submission.text_content %}<div class="preserve-lines work-content">{{ submission.text_content }}</div>{% endif %}
+  {% if submission.stored_file_path %}
+    {% set file_url = '/' ~ workspace ~ '/submissions/' ~ submission.id ~ '/file' %}
+    {% set filename = submission.original_filename or 'Submitted file' %}
+    <div class="submission-file">
+      <p><strong>{{ filename }}</strong></p>
+      {% if submission.mime_type in inline_image_types %}
+      <a href="{{ file_url }}" aria-label="Open image preview for {{ filename }}"><img class="submission-preview" src="{{ file_url }}" alt="Submitted work from {{ student_name }}" loading="lazy"></a>
+      {% endif %}
+      <div class="actions">
+        {% if submission.mime_type in inline_image_types %}<a class="ghost-button button-link" href="{{ file_url }}">Open image preview</a>{% endif %}
+        <a class="ghost-button button-link" href="{{ file_url }}?download=true">Download file <span class="file-name">({{ filename }})</span></a>
+      </div>
+    </div>
+  {% elif submission.telegram_file_id or not submission.text_content %}
+    <p class="notice">No stored file is available for this attempt. Ask the student to attach it again if needed.</p>
+  {% endif %}
+{%- endmacro %}
+{% macro feedback_note(review, reviewer, outcome, timezone, delivery=none, show_delivery=false) -%}
+  <div class="review-feedback">
+    <div class="section-head"><h4>{{ 'Marked complete' if outcome is sameas true else 'Revision requested' if outcome is sameas false else 'Feedback saved' }}</h4><span class="tiny">{{ review.created_at|local_deadline(timezone) }}</span></div>
+    <p class="tiny">Reviewed by {{ reviewer }}</p>
+    <p class="preserve-lines">{{ review.message }}</p>
+    {% if show_delivery %}
+    <div class="delivery-line">
+      <strong>Telegram delivery</strong>
+      {% if delivery %}{{ delivery_badge(delivery.status) }}<span>{{ delivery_help(delivery.status, delivery.error != 'User has not linked Telegram') }}</span>
+      {% else %}<span>No delivery record.</span>{% endif %}
+    </div>
+    {% endif %}
+  </div>
 {%- endmacro %}

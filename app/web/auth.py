@@ -7,8 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.auth.security import current_user, validate_csrf, verify_password
 from app.database import get_db
-from app.models import SchoolMembership, User
-from app.web.helpers import render
+from app.models import User
+from app.services.authorization import workspace_roles
+from app.web.demo_accounts import demo_account_groups
+from app.web.helpers import WORKSPACES, csrf, render
 
 router = APIRouter()
 
@@ -19,33 +21,35 @@ def home(request: Request, db: Session = Depends(get_db)):
         user = current_user(request, db)
     except HTTPException:
         return RedirectResponse("/login", status_code=303)
-    coordinator = db.scalar(
-        select(SchoolMembership).where(
-            SchoolMembership.user_id == user.id,
-            SchoolMembership.role == "coordinator",
-        )
+    roles = workspace_roles(db, user)
+    for role in WORKSPACES:
+        if role in roles:
+            return RedirectResponse(f"/{role}", status_code=303)
+    return render(
+        request,
+        "error.html",
+        status_code=403,
+        code=403,
+        user=user,
+        csrf_token=csrf(request),
+        detail="You don’t have a workspace yet. Ask your school coordinator to add you.",
     )
-    if coordinator:
-        return RedirectResponse("/coordinator", status_code=303)
-    teacher = db.scalar(
-        select(SchoolMembership).where(
-            SchoolMembership.user_id == user.id,
-            SchoolMembership.role == "teacher",
-        )
-    )
-    return RedirectResponse("/teacher" if teacher else "/student", status_code=303)
 
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)):
-    return render(request, "login.html", demo=demo_accounts_available(request, db))
+    return render_login(request, db)
 
 
-def demo_accounts_available(request: Request, db: Session) -> bool:
-    settings = request.app.state.settings
-    if settings.environment != "development" or settings.telegram_mode != "log":
-        return False
-    return db.scalar(select(User.id).where(User.email == "teacher@demo.local")) is not None
+def render_login(request: Request, db: Session, **context):
+    response = render(
+        request,
+        "login.html",
+        demo_groups=demo_account_groups(request.app.state.settings, db),
+        **context,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @router.post("/login")
@@ -57,9 +61,12 @@ def login(
 ):
     user = db.scalar(select(User).where(User.email == email.strip().lower()))
     if not user or not verify_password(password, user.password_hash):
-        return render(
-            request, "login.html", status_code=401, error="Check your email and password and try again.",
-            email=email, demo=demo_accounts_available(request, db),
+        return render_login(
+            request,
+            db,
+            status_code=401,
+            error="Check your email and password and try again.",
+            email=email,
         )
     token, _ = request.app.state.sessions.create(user.id)
     response = RedirectResponse("/", status_code=303)

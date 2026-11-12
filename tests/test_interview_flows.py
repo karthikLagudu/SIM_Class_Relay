@@ -191,12 +191,12 @@ def test_coordinator_manual_run_and_risk_exclude_other_school(client, app, db, d
     get_student_state(db, assignment.id, student.id).status = "blocked"
     get_student_state(db, other.id, other_student.id).status = "blocked"
     db.commit()
-    assert {item.assignment_id for item in RiskService().for_actor(db, teacher)} == {assignment.id}
+    assert RiskService().for_actor(db, teacher) == []
     monkeypatch.setattr(app.state.settings, "quiet_hour_start", 0)
     monkeypatch.setattr(app.state.settings, "quiet_hour_end", 0)
     csrf = authenticate(client, app, teacher.id)
     response = client.post(
-        "/teacher/reminders/run", data={"csrf_token": csrf}, follow_redirects=False
+        "/coordinator/reminders/run", data={"csrf_token": csrf, "school_id": data["school1"].id}, follow_redirects=False
     )
     assert response.status_code == 303
     assert set(db.scalars(select(NotificationDelivery.assignment_id))) == {assignment.id}

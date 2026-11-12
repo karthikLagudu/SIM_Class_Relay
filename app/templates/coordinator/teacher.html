@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% from "components.html" import assignment_badge %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/coordinator?school_id={{ school.id }}#teacher-roster">{{ school.name }} teacher directory</a></nav>
+<header class="hero compact-hero workspace-hero"><div><p class="eyebrow">{{ school.name }}</p><h1>{{ row.teacher.name }}</h1><p>{{ row.teacher.email }}</p></div><a class="primary button-link" href="#class-access">Manage class assignments</a></header>
+<dl class="details-grid staff-metrics">
+  <div><dt>Unique students</dt><dd>{{ row.student_count }}</dd></div>
+  <div><dt>Active assignments</dt><dd>{{ row.active_count }} total · {{ row.personal_count }} personally created</dd></div>
+  <div><dt>Awaiting review</dt><dd>{{ row.review_count }}</dd></div>
+  <div><dt>Students needing attention</dt><dd>{{ row.attention_count }}</dd></div>
+</dl>
+{% for item in row.classes %}
+<section class="card stack" aria-labelledby="teacher-class-{{ item.classroom.id }}">
+  <div class="section-head"><h2 id="teacher-class-{{ item.classroom.id }}">{{ item.classroom.name }}</h2>{% if item.teachers|length > 1 %}<span class="badge">Co-taught · shared workload</span>{% endif %}</div>
+  <p>{{ item.classroom.grade }} · {{ item.students|length }} students · {{ item.reviews|length }} awaiting review · {{ item.risks|map(attribute='student_id')|unique|list|length }} need attention</p>
+  <div class="actions"><a class="ghost-button button-link" href="/coordinator/submissions?school_id={{ school.id }}&amp;class_id={{ item.classroom.id }}&amp;status=awaiting">Review queue</a><a class="ghost-button button-link" href="/coordinator/classes/{{ item.classroom.id }}#students">Manage roster</a></div>
+  <details class="disclosure-inline"><summary>Student roster</summary><ul>{% for student in item.students %}<li>{{ student.name }}</li>{% else %}<li>No enrolled students</li>{% endfor %}</ul></details>
+  <details class="disclosure-inline"><summary>Assignments</summary>
+    <div class="list">{% for assignment in item.assignments %}<a class="list-row" href="{{ assignment|assignment_path('coordinator') }}"><div><strong>{{ assignment.title }}</strong><span>{{ 'Created by ' ~ row.teacher.name if assignment.created_by_user_id == row.teacher.id else 'Created by another staff member' }}</span></div>{{ assignment_badge(assignment.status) }}</a>{% else %}<p>No assignments yet.</p>{% endfor %}</div>
+  </details>
+</section>
+{% else %}<p class="notice">This teacher has no active class assignments.</p>{% endfor %}
+<section class="card stack" id="class-access">
+  <h2>Class assignments</h2>
+  <form action="/coordinator/staffing/preview" method="post" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="school_id" value="{{ school.id }}"><input type="hidden" name="teacher_id" value="{{ row.teacher.id }}">
+    <fieldset class="student-picker"><legend>Classes this teacher should teach</legend>
+      {% for classroom in classes %}<label class="check-row"><input type="checkbox" name="selected_ids" value="{{ classroom.id }}" {% if classroom.id in selected_ids %}checked{% endif %}><span>{{ classroom.name }}</span></label>{% else %}<p>No active classes.</p>{% endfor %}
+    </fieldset>
+    <div class="actions"><button class="primary">Review class assignments</button></div>
+  </form>
+  <form action="/coordinator/staffing/preview" method="post" class="section-divider">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="school_id" value="{{ school.id }}"><input type="hidden" name="teacher_id" value="{{ row.teacher.id }}"><input type="hidden" name="revoke" value="true">
+    <button class="danger-button">Review removal of school teaching access</button>
+  </form>
+</section>
+{% endblock %}

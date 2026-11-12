@@ -1,27 +1,80 @@
 {% extends "base.html" %}
+{% from "components.html" import assignment_badge %}
 {% block content %}
 <header class="hero compact-hero workspace-hero">
-  <div><p class="eyebrow">School overview</p><h1>{{ school.name }}</h1><p>{{ classes|length }} {{ 'class' if classes|length == 1 else 'classes' }} · {{ teachers|length }} {{ 'teacher' if teachers|length == 1 else 'teachers' }} · {{ school.timezone }}</p></div>
-  <div class="actions"><a class="primary button-link" href="#create-class">Create a class</a><a class="ghost-button button-link" href="/teacher">Open classwork</a></div>
+  <div><p class="eyebrow">School overview</p><h1>{{ school.name }}</h1><p>{{ school.timezone }}</p></div>
+  <div class="actions"><a class="primary button-link" href="#create-class">Create a class</a></div>
 </header>
-{% if schools|length > 1 %}
-<form class="scope-picker" action="/coordinator" method="get">
-  <label for="coordinator-school">School</label>
-  <select name="school_id" id="coordinator-school">{% for item in schools %}<option value="{{ item.id }}" {% if item.id == school.id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select>
-  <button class="ghost-button">Switch school</button>
-</form>
-{% endif %}
-<nav class="section-links" aria-label="School sections"><a href="#classes">Classes &amp; enrollment</a><a href="#teacher-roster">Teachers</a>{% if classes %}<a href="#add-teacher">Add a teacher</a>{% endif %}</nav>
+<dl class="details-grid school-totals" aria-label="School totals">
+  <div><dt>Teachers</dt><dd>{{ teachers|length }}</dd></div>
+  <div><dt>Students</dt><dd>{{ student_count }}</dd></div>
+  <div><dt>Classes</dt><dd>{{ classes|length }} · {{ active_classes|length }} active</dd></div>
+  <div><dt><a href="/coordinator/submissions?school_id={{ school.id }}&amp;status=awaiting">Submissions awaiting review</a></dt><dd>{{ pending_reviews }}</dd></div>
+</dl>
+<nav class="section-links" aria-label="School sections"><a href="#classes">Classes &amp; enrollment</a><a href="#teacher-roster">Teacher directory</a><a href="#recent-classwork">Recent classwork</a><a href="#school-settings">School settings</a><a href="#school-activity">Activity</a></nav>
 <section class="card" id="classes" aria-labelledby="school-classes">
   <h2 id="school-classes">Classes &amp; enrollment</h2>
   <div class="school-classes">
     {% for classroom in classes %}
     <article class="class-row" id="class-{{ classroom.id }}">
-      <div><h3><a href="/teacher/classes/{{ classroom.id }}">{{ classroom.name }}</a></h3><p>{{ classroom.grade }} · {{ counts.get(classroom.id,0) }} enrolled</p></div>
-      <div class="actions"><a class="ghost-button button-link" href="/teacher/classes/{{ classroom.id }}#students">Students &amp; Telegram</a><a class="ghost-button button-link" href="/teacher/classes/{{ classroom.id }}#invites">Invites</a></div>
+      {% set work = workloads[classroom.id] %}
+      <div><h3><a href="/coordinator/classes/{{ classroom.id }}">{{ classroom.name }}</a></h3>
+        <p>{{ classroom.grade }} · {{ work.students|length }} enrolled{% if not classroom.archived_at %} · {{ work.reviews|length }} awaiting review{% endif %}</p>
+        {% if classroom.archived_at %}<span class="badge skipped">Archived</span>{% elif not work.teachers %}<span class="badge needs_revision">No assigned teacher</span>{% endif %}
+        {% if work.teachers %}<p>{{ work.teachers|map(attribute='name')|join(', ') }}</p>{% endif %}
+      </div>
+      <div class="actions"><a class="ghost-button button-link" href="/coordinator/classes/{{ classroom.id }}" aria-label="Manage {{ classroom.name }}">Manage class</a><a class="ghost-button button-link" href="/coordinator/classes/{{ classroom.id }}#invites" aria-label="Invitations for {{ classroom.name }}">Invitations</a><a class="ghost-button button-link" href="/coordinator/classes/{{ classroom.id }}/work">Classwork</a></div>
     </article>
     {% else %}<p class="empty">No classes yet. Create a class, then add its teachers and students.</p>{% endfor %}
   </div>
+</section>
+<section class="card" id="recent-classwork" aria-labelledby="recent-classwork-title">
+  <h2 id="recent-classwork-title">Recent classwork</h2>
+  <div class="list">{% for assignment in recent_assignments %}
+    {% set item = workloads[assignment.classroom_id] %}
+    <a class="list-row" href="{{ assignment|assignment_path('coordinator') }}"><div><strong>{{ assignment.title }}</strong><span>{{ item.classroom.name }}{% if item.classroom.archived_at %} · Archived{% endif %}</span></div>{{ assignment_badge(assignment.status) }}</a>
+  {% else %}<p class="empty">This school has no assignments yet. Open a class to create one.</p>{% endfor %}</div>
+</section>
+<section class="card" id="teacher-roster" aria-labelledby="school-teachers">
+  <div class="section-head"><h2 id="school-teachers">Teacher directory</h2><a class="ghost-button button-link" href="#add-teacher">Add a teacher</a></div>
+  <form class="scope-picker directory-filter" action="/coordinator#teacher-roster" method="get">
+    <input type="hidden" name="school_id" value="{{ school.id }}">
+    <div><label for="teacher-query">Teacher name</label><input id="teacher-query" name="q" type="search" value="{{ query }}"></div>
+    <div><label for="teacher-class-filter">Class</label><select id="teacher-class-filter" name="class_filter"><option value="">All teachers</option><option value="unassigned" {% if filter_by == 'unassigned' %}selected{% endif %}>Unassigned</option>{% for classroom in active_classes %}<option value="{{ classroom.id }}" {% if filter_by == classroom.id|string %}selected{% endif %}>{{ classroom.name }}</option>{% endfor %}</select></div>
+    <button class="ghost-button">Filter teachers</button>
+    {% if query or filter_by %}<a class="ghost-button button-link" href="/coordinator?school_id={{ school.id }}#teacher-roster">Clear filters</a>{% endif %}
+  </form>
+  {% if directory %}
+  <table class="roster-table" role="table" aria-labelledby="school-teachers">
+    <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Teacher</th><th role="columnheader" scope="col">Assigned classes</th><th role="columnheader" scope="col">Unique students</th><th role="columnheader" scope="col">Workload</th></tr></thead>
+    <tbody role="rowgroup">
+    {% for row in directory %}
+    <tr role="row">
+      <th role="rowheader" scope="row">
+        <a class="roster-name" href="/coordinator/schools/{{ school.id }}/teachers/{{ row.teacher.id }}">{{ row.teacher.name }}</a>
+        <span class="roster-secondary">{{ row.teacher.email }}</span>
+        <a class="roster-action" href="/coordinator/schools/{{ school.id }}/teachers/{{ row.teacher.id }}#class-access" aria-label="Manage classes for {{ row.teacher.name }}">Manage classes</a>
+      </th>
+      <td role="cell"><span class="cell-label">Assigned classes</span>
+        <ul class="roster-classes">
+        {% for item in row.classes %}<li><a href="/coordinator/classes/{{ item.classroom.id }}">{{ item.classroom.name }}</a> · {{ item.students|length }} students{% if item.teachers|length > 1 %} · Co-taught{% endif %}</li>
+        {% else %}<li><span class="badge pending">Unassigned</span></li>{% endfor %}
+        </ul>
+      </td>
+      <td role="cell"><span class="cell-label">Unique students</span><strong class="roster-count">{{ row.student_count }}</strong></td>
+      <td role="cell"><span class="cell-label">Workload</span>
+        <ul class="roster-classes">
+          <li><strong>{{ row.active_count }}</strong> active · {{ row.personal_count }} personally created</li>
+          <li><strong>{{ row.review_count }}</strong> awaiting review</li>
+          <li><strong>{{ row.attention_count }}</strong> students needing attention</li>
+        </ul>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">{{ 'No teachers match these filters. Try clearing the filters or searching for a different name.' if teachers else 'No teachers yet. Add one to get started.' }}</p>{% endif %}
+  <p class="field-hint">Workload includes all active assignments in the listed classes. Co-taught classes share review and attention queues.</p>
 </section>
 <div class="grid two-one">
   <section class="card" id="create-class" aria-labelledby="class-create-title">
@@ -35,20 +88,8 @@
       <div class="actions"><button class="primary">Create class</button></div>
     </form>
   </section>
-  <section class="card" id="teacher-roster" aria-labelledby="school-teachers">
-    <h2 id="school-teachers">Teachers</h2>
-    <div class="list">
-      {% for teacher in teachers %}
-      <div class="list-row"><div><strong>{{ teacher.name }}</strong><span>{{ teacher.email }}</span><span>{{ teacher_classes.get(teacher.id, [])|map(attribute="name")|join(", ") or "No classes assigned" }}</span></div></div>
-      {% else %}<p class="empty">No teacher accounts yet. Add a teacher after creating a class.</p>{% endfor %}
-    </div>
-    {% if classes %}<a class="ghost-button button-link" href="#add-teacher">Add a teacher</a>{% endif %}
-  </section>
-</div>
-<section class="card form-card" id="add-teacher" aria-labelledby="teacher-create-title">
+<section class="card" id="add-teacher" aria-labelledby="teacher-create-title">
   <h2 id="teacher-create-title">Add a teacher</h2>
-  {% if not classes %}<p>Create a class first so you can give the teacher access to it.</p>
-  {% else %}
   <form method="post" action="/coordinator/teachers#add-teacher" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="school_id" value="{{ school.id }}">
@@ -60,13 +101,39 @@
     <label>Temporary password <input type="password" name="temporary_password" minlength="10" autocomplete="new-password" aria-describedby="teacher-password-hint{% if errors.get('teacher') %} teacher-error{% endif %}" required></label>
     <p class="field-hint" id="teacher-password-hint">Use at least 10 characters and share the password privately.</p>
     <fieldset class="student-picker" {% if errors.get('teacher') %}aria-describedby="teacher-error"{% endif %}>
-      <legend>Class access</legend>
-      {% for classroom in classes %}
+      <legend>Class access (optional)</legend>
+      {% for classroom in active_classes %}
       <label class="check-row"><input type="checkbox" name="classroom_ids" value="{{ classroom.id }}" {% if classroom.id in form.get('classroom_ids',[]) %}checked{% endif %}><span>{{ classroom.name }}</span></label>
+      {% else %}<p>No active classes yet. You can assign this teacher later.</p>
       {% endfor %}
     </fieldset>
     <div class="actions"><button class="primary">Create teacher account</button></div>
   </form>
-  {% endif %}
 </section>
+</div>
+<section class="card stack" id="school-settings" aria-labelledby="school-settings-title">
+  <h2 id="school-settings-title">School settings</h2>
+  {% if errors.get('school') %}<p class="error" id="school-settings-error" role="alert">{{ errors.school }}</p>{% endif %}
+  <form method="post" action="/coordinator/schools/{{ school.id }}/edit#school-settings" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-grid">
+      <label>School name <input name="name" value="{{ form.get('school_name', school.name) }}" maxlength="160" required {% if errors.get('school') %}aria-describedby="school-settings-error"{% endif %}></label>
+      <label>School time zone <input name="timezone" value="{{ form.get('timezone', school.timezone) }}" maxlength="80" required aria-describedby="school-timezone-hint{% if errors.get('school') %} school-settings-error{% endif %}"></label>
+    </div>
+    <p class="field-hint" id="school-timezone-hint">Use an IANA time zone such as Asia/Kolkata. Existing deadlines keep their saved time zone.</p>
+    <div class="actions"><button class="ghost-button">Save school details</button></div>
+  </form>
+</section>
+{% if classes %}
+<details class="card disclosure" id="school-reminders">
+  <summary>School reminders</summary>
+  <p>Process reminders that are due for classes in {{ school.name }}.</p>
+  <form method="post" action="/coordinator/reminders/run">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="school_id" value="{{ school.id }}">
+    <button class="ghost-button">Run school reminders</button>
+  </form>
+</details>
+{% endif %}
+{% include 'coordinator/activity.html' %}
 {% endblock %}

@@ -7,25 +7,78 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, Request
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.security import current_session, current_user
 from app.database import get_db
 from app.exceptions import ValidationError
-from app.models import User
+from app.models import Assignment, School, User
+from app.services.authorization import (
+    coordinated_schools,
+    list_teacher_classes,
+    require_coordinator_school,
+    workspace_roles,
+)
+
+WORKSPACES = {"coordinator": "Coordinator", "teacher": "Teacher", "student": "Student"}
 
 
 def render(request: Request, template: str, *, status_code: int = 200, **context):
+    roles = getattr(request.state, "workspace_roles", set())
+    workspaces = {role: name for role, name in WORKSPACES.items() if role in roles}
+    role = request.url.path.split("/", 2)[1]
+    if role not in workspaces:
+        role = next(iter(workspaces), None)
+    user = getattr(request.state, "workspace_user", None)
     return request.app.state.templates.TemplateResponse(
         request=request,
         name=template,
         status_code=status_code,
-        context={"offline_demo": request.app.state.settings.telegram_mode == "log", **context},
+        context={
+            "offline_demo": request.app.state.settings.telegram_mode == "log",
+            "workspaces": workspaces,
+            "workspace": role,
+            "managed_schools": getattr(request.state, "managed_schools", ()),
+            "teaching_classes": getattr(request.state, "teaching_classes", ()),
+            "teaching_schools": getattr(request.state, "teaching_schools", {}),
+            "school": getattr(request.state, "active_school", None),
+            "user": user,
+            "csrf_token": csrf(request) if user else None,
+            **context,
+        },
     )
 
 
 def web_user(request: Request, db: Session = Depends(get_db)) -> User:
-    return current_user(request, db)
+    user = current_user(request, db)
+    if not request.url.path.startswith("/api/"):
+        request.state.workspace_user = user
+        request.state.workspace_roles = workspace_roles(db, user)
+        if (
+            request.url.path.split("/", 2)[1] == "coordinator"
+            and "coordinator" in request.state.workspace_roles
+        ):
+            request.state.managed_schools = coordinated_schools(db, user)
+        if (
+            request.url.path.split("/", 2)[1] == "teacher"
+            and "teacher" in request.state.workspace_roles
+        ):
+            classes = list_teacher_classes(db, user)
+            request.state.teaching_classes = classes
+            request.state.teaching_schools = {
+                school.id: school
+                for school in db.scalars(
+                    select(School).where(School.id.in_({item.school_id for item in classes}))
+                )
+            }
+    return user
+
+
+def coordinator_school(request: Request, db: Session, user: User, school_id: int) -> School:
+    school = require_coordinator_school(db, user, school_id)
+    request.state.active_school = school
+    return school
 
 
 def csrf(request: Request) -> str:
@@ -34,6 +87,10 @@ def csrf(request: Request) -> str:
 
 def operation_key(prefix: str) -> str:
     return f"{prefix}:{uuid.uuid4()}"
+
+
+def assignment_path(assignment: Assignment, workspace: str) -> str:
+    return f"/{workspace}/classes/{assignment.classroom_id}/assignments/{assignment.id}"
 
 
 def redirect_with_message(path: str, message: str, *, anchor: str = "") -> RedirectResponse:

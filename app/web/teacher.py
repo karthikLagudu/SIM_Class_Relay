@@ -4,13 +4,18 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import and_, func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
 from app.database import get_db
-from app.exceptions import InvalidStateTransition, LLMInterpretationError, ValidationError
+from app.exceptions import (
+    InvalidStateTransition,
+    LLMInterpretationError,
+    NotFoundError,
+    ValidationError,
+)
 from app.models import (
     ActivityEvent,
     Assignment,
@@ -18,29 +23,30 @@ from app.models import (
     ClassMembership,
     Classroom,
     Feedback,
-    Invite,
     NotificationDelivery,
     Reminder,
     School,
-    SchoolMembership,
     StudentAssignmentState,
     Submission,
-    TelegramLinkToken,
     User,
 )
 from app.reminders.policy import aware_utc
 from app.services.authorization import (
     list_teacher_classes,
-    require_teacher_assignment,
+    require_active_class,
+    require_coordinator_class,
+    require_staff_assignment,
+    require_staff_submission,
     require_teacher_class,
-    require_teacher_submission,
 )
-from app.services.classroom import ClassroomService
 from app.services.risk import RiskService
 from app.services.submission import FeedbackService
-from app.services.telegram_link import TelegramConnectionLink
+from app.services.submission_history import feedback_outcomes
+from app.services.workload import pending_reviews
 from app.web.files import INLINE_IMAGE_TYPES
 from app.web.helpers import (
+    assignment_path,
+    coordinator_school,
     csrf,
     operation_key,
     parse_local_deadline,
@@ -48,162 +54,71 @@ from app.web.helpers import (
     render,
     web_user,
 )
+from app.web.submissions import render_submission
 
 router = APIRouter()
-
-
-def _render_class_page(
-    request: Request,
-    user: User,
-    db: Session,
-    class_id: int,
-    *,
-    connection_link: TelegramConnectionLink | None = None,
-    link_student_id: int | None = None,
-    message: str | None = None,
-    errors: dict[str, str] | None = None,
-    form: dict | None = None,
-):
-    classroom = require_teacher_class(db, user, class_id)
-    students = list(
-        db.scalars(
-            select(User)
-            .join(ClassMembership, ClassMembership.user_id == User.id)
-            .where(
-                ClassMembership.classroom_id == class_id,
-                ClassMembership.role == "student",
-            )
-            .order_by(User.name)
-        )
-    )
-    assignments = list(
-        db.scalars(
-            select(Assignment)
-            .where(Assignment.classroom_id == class_id)
-            .order_by(Assignment.due_at)
-        )
-    )
-    invites = list(
-        db.scalars(
-            select(Invite).where(Invite.classroom_id == class_id).order_by(Invite.created_at.desc())
-        )
-    )
-    student_ids = [student.id for student in students]
-    active_tokens = {}
-    if student_ids:
-        active_tokens = {
-            token.user_id: token
-            for token in db.scalars(
-                select(TelegramLinkToken)
-                .where(
-                    TelegramLinkToken.user_id.in_(student_ids),
-                    TelegramLinkToken.used_at.is_(None),
-                    TelegramLinkToken.revoked_at.is_(None),
-                    TelegramLinkToken.expires_at > datetime.now(UTC),
-                )
-                .order_by(TelegramLinkToken.created_at)
-            )
-        }
-    response = render(
-        request,
-        "teacher/class.html",
-        user=user,
-        classroom=classroom,
-        students=students,
-        assignments=assignments,
-        invites=invites,
-        active_tokens=active_tokens,
-        school=db.get(School, classroom.school_id),
-        expired_invites={
-            item.id
-            for item in invites
-            if item.expires_at and aware_utc(item.expires_at) <= datetime.now(UTC)
-        },
-        can_link=bool(request.app.state.settings.telegram_bot_username),
-        status_code=422 if errors else 200,
-        errors=errors or {},
-        form=form or {},
-        connection_link=connection_link,
-        link_student_id=link_student_id,
-        csrf_token=csrf(request),
-        assignment_key=operation_key("assignment"),
-        message=message,
-    )
-    if connection_link:
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Referrer-Policy"] = "no-referrer"
-    return response
-
-
-def _teaching_schools(db: Session, user: User) -> list[School]:
-    return list(
-        db.scalars(
-            select(School)
-            .join(SchoolMembership, SchoolMembership.school_id == School.id)
-            .where(
-                SchoolMembership.user_id == user.id,
-                SchoolMembership.role.in_(["teacher", "coordinator"]),
-            )
-            .distinct()
-            .order_by(School.name)
-        )
-    )
 
 
 @router.get("/teacher", response_class=HTMLResponse)
 def teacher_dashboard(
     request: Request,
-    class_id: int | None = None,
+    class_id: str = "",
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
-    return _render_dashboard(request, user, db, class_id=class_id)
-
-
-def _render_dashboard(
-    request: Request, user: User, db: Session, *, class_id=None, class_error=None, form=None
-):
-    classes = list_teacher_classes(db, user)
-    schools = _teaching_schools(db, user)
-    if not classes and not schools:
-        raise HTTPException(403, "Use a teacher or coordinator account to view classwork.")
-    active = (
-        require_teacher_class(db, user, class_id)
-        if class_id is not None
-        else next(iter(classes), None)
+    if "teacher" not in request.state.workspace_roles:
+        raise HTTPException(403, "A teaching membership is required to open this workspace.")
+    try:
+        selected_id = int(class_id) if class_id else None
+    except ValueError as exc:
+        raise ValidationError("Choose one of your assigned classes.") from exc
+    active = require_teacher_class(db, user, selected_id) if selected_id is not None else None
+    return _render_classwork(
+        request, user, db, active, request.state.teaching_classes, request.state.teaching_schools
     )
+
+
+def _workspace(request: Request) -> str:
+    return "coordinator" if request.url.path.startswith("/coordinator/") else "teacher"
+
+
+def _staff_class(request: Request, db: Session, user: User, class_id: int):
+    require = (
+        require_coordinator_class if _workspace(request) == "coordinator" else require_teacher_class
+    )
+    classroom = require(db, user, class_id)
+    if _workspace(request) == "coordinator":
+        coordinator_school(request, db, user, classroom.school_id)
+    return classroom
+
+
+@router.get("/coordinator/classes/{class_id}/work", response_class=HTMLResponse)
+def coordinator_classwork(
+    request: Request, class_id: int, user: User = Depends(web_user), db: Session = Depends(get_db)
+):
+    active = require_coordinator_class(db, user, class_id)
+    return _render_classwork(
+        request, user, db, active, [], {active.school_id: db.get(School, active.school_id)}
+    )
+
+
+def _render_classwork(request, user, db, active, classes, schools):
     assignments, risks, reviews, deliveries = [], [], [], []
-    if active:
+    scope = [active] if active else classes
+    class_ids = [item.id for item in scope]
+    open_ids = [item.id for item in scope if item.archived_at is None]
+    if class_ids:
         assignments = list(
             db.scalars(
                 select(Assignment)
-                .where(Assignment.classroom_id == active.id)
+                .where(Assignment.classroom_id.in_(class_ids))
                 .order_by(Assignment.due_at, Assignment.id)
             )
         )
-        risks = RiskService().for_actor(db, user, classroom_id=active.id)
-        latest = select(func.max(Submission.id)).group_by(
-            Submission.assignment_id, Submission.student_id
-        )
-        reviews = db.execute(
-            select(Submission, Assignment, User)
-            .join(Assignment, Assignment.id == Submission.assignment_id)
-            .join(User, User.id == Submission.student_id)
-            .join(
-                StudentAssignmentState,
-                and_(
-                    StudentAssignmentState.assignment_id == Submission.assignment_id,
-                    StudentAssignmentState.student_id == Submission.student_id,
-                ),
-            )
-            .where(
-                Assignment.classroom_id == active.id,
-                Assignment.status == "assigned",
-                StudentAssignmentState.status == "submitted",
-                Submission.id.in_(latest),
-            )
-            .order_by(Submission.created_at, Submission.id)
-        ).all()
+    if open_ids:
+        risks = RiskService().for_classes(db, open_ids)
+        reviews = db.execute(pending_reviews(open_ids)).all()
+    if active:
         deliveries = list(
             db.scalars(
                 select(NotificationDelivery)
@@ -221,17 +136,20 @@ def _render_dashboard(
     due_soon = [
         item
         for item in assignments
-        if item.status == "assigned" and now <= aware_utc(item.due_at) <= now + timedelta(days=1)
+        if item.classroom_id in open_ids
+        and item.status == "assigned"
+        and now <= aware_utc(item.due_at) <= now + timedelta(days=1)
     ]
     return render(
         request,
         "teacher/dashboard.html",
-        status_code=422 if class_error else 200,
         user=user,
         classes=classes,
         schools=schools,
+        classroom_names={item.id: item.name for item in scope},
         active=active,
-        school=db.get(School, active.school_id) if active else None,
+        coordinating=_workspace(request) == "coordinator",
+        school=schools[active.school_id] if active else None,
         assignments=assignments,
         due_soon=due_soon,
         risks=risks,
@@ -239,205 +157,7 @@ def _render_dashboard(
         blocked_count=len({item.student_id for item in risks if "blocked" in item.reasons}),
         deliveries=deliveries,
         csrf_token=csrf(request),
-        class_error=class_error,
-        form=form or {},
         message=request.query_params.get("message"),
-    )
-
-
-@router.get("/teacher/classes/{class_id}", response_class=HTMLResponse)
-def teacher_class(
-    request: Request,
-    class_id: int,
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    return _render_class_page(
-        request,
-        user,
-        db,
-        class_id,
-        message=request.query_params.get("message"),
-    )
-
-
-@router.post("/teacher/classes/{class_id}/connect-telegram", response_class=HTMLResponse)
-def connect_teacher_telegram(
-    request: Request,
-    class_id: int,
-    csrf_token: str = Form(),
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    validate_csrf(request, csrf_token)
-    try:
-        link = request.app.state.telegram_link_service.create_teacher_link(db, user, class_id)
-        db.commit()
-    except ValidationError as exc:
-        db.rollback()
-        return _render_class_page(request, user, db, class_id, errors={"telegram": str(exc)})
-    response = render(
-        request, "teacher/connect_telegram.html", user=user, link=link, class_id=class_id
-    )
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    return response
-
-
-@router.post("/teacher/classes")
-def create_classroom(
-    request: Request,
-    school_id: int = Form(),
-    name: str = Form(),
-    grade: str = Form(),
-    csrf_token: str = Form(),
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    validate_csrf(request, csrf_token)
-    try:
-        classroom = ClassroomService().create_classroom(db, user, school_id, name, grade)
-        db.commit()
-    except ValidationError as exc:
-        db.rollback()
-        return _render_dashboard(
-            request,
-            user,
-            db,
-            class_error=str(exc),
-            form={"school_id": school_id, "name": name, "grade": grade},
-        )
-    return redirect_with_message(
-        f"/teacher/classes/{classroom.id}",
-        "Class created. Add students to get started.",
-        anchor="students",
-    )
-
-
-@router.post("/teacher/classes/{class_id}/students")
-def add_student(
-    request: Request,
-    class_id: int,
-    name: str = Form(),
-    email: str = Form(),
-    csrf_token: str = Form(),
-    temporary_password: str = Form(default=""),
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    validate_csrf(request, csrf_token)
-    try:
-        student = ClassroomService().add_student(
-            db, user, class_id, name, email, temporary_password
-        )
-        db.commit()
-    except ValidationError as exc:
-        db.rollback()
-        return _render_class_page(
-            request,
-            user,
-            db,
-            class_id,
-            errors={"student": str(exc)},
-            form={"name": name, "email": email},
-        )
-    return redirect_with_message(
-        f"/teacher/classes/{class_id}",
-        f"{student.name} is enrolled. You can generate their Telegram link below.",
-        anchor=f"student-{student.id}",
-    )
-
-
-@router.post("/teacher/classes/{class_id}/students/{student_id}/telegram-link")
-def create_telegram_link(
-    request: Request,
-    class_id: int,
-    student_id: int,
-    csrf_token: str = Form(),
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    validate_csrf(request, csrf_token)
-    try:
-        link = request.app.state.telegram_link_service.create_link(db, user, class_id, student_id)
-        db.commit()
-    except ValidationError as exc:
-        db.rollback()
-        return _render_class_page(request, user, db, class_id, errors={"telegram": str(exc)})
-    return _render_class_page(
-        request,
-        user,
-        db,
-        class_id,
-        connection_link=link,
-        link_student_id=student_id,
-        message="Secure Telegram link generated. Copy it before leaving this page.",
-    )
-
-
-@router.post("/teacher/classes/{class_id}/students/{student_id}/telegram-disconnect")
-def disconnect_telegram(
-    request: Request,
-    class_id: int,
-    student_id: int,
-    csrf_token: str = Form(),
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    validate_csrf(request, csrf_token)
-    request.app.state.telegram_link_service.disconnect(db, user, class_id, student_id)
-    db.commit()
-    return RedirectResponse(
-        f"/teacher/classes/{class_id}?message=Telegram+disconnected", status_code=303
-    )
-
-
-@router.post("/teacher/classes/{class_id}/invites")
-def create_invite(
-    request: Request,
-    class_id: int,
-    expires_in_days: int = Form(default=7),
-    max_uses: int = Form(default=20),
-    csrf_token: str = Form(),
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    validate_csrf(request, csrf_token)
-    try:
-        invite = ClassroomService().create_invite(db, user, class_id, expires_in_days, max_uses)
-        db.commit()
-    except ValidationError as exc:
-        db.rollback()
-        return _render_class_page(
-            request,
-            user,
-            db,
-            class_id,
-            errors={"invite": str(exc)},
-            form={"expires_in_days": expires_in_days, "max_uses": max_uses},
-        )
-    return redirect_with_message(
-        f"/teacher/classes/{class_id}",
-        f"Invite {invite.code} created. Share it with enrolled students.",
-        anchor="invites",
-    )
-
-
-@router.post("/teacher/invites/{invite_id}/disable")
-def disable_invite(
-    request: Request,
-    invite_id: int,
-    csrf_token: str = Form(),
-    user: User = Depends(web_user),
-    db: Session = Depends(get_db),
-):
-    validate_csrf(request, csrf_token)
-    invite = ClassroomService().disable_invite(db, user, invite_id)
-    db.commit()
-    return redirect_with_message(
-        f"/teacher/classes/{invite.classroom_id}",
-        "Invite disabled. Existing class members keep their access.",
-        anchor="invites",
     )
 
 
@@ -469,15 +189,22 @@ def _render_assignment_form(
     )
 
 
+@router.get("/coordinator/classes/{class_id}/assignments/new", response_class=HTMLResponse)
 @router.get("/teacher/classes/{class_id}/assignments/new", response_class=HTMLResponse)
 def new_assignment(
     request: Request,
     class_id: int,
     entry: str = "natural",
+    next_class_id: int | None = None,
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
-    classroom = require_teacher_class(db, user, class_id)
+    classroom = require_active_class(_staff_class(request, db, user, class_id))
+    if next_class_id is not None:
+        destination = require_active_class(_staff_class(request, db, user, next_class_id))
+        return RedirectResponse(
+            f"/{_workspace(request)}/classes/{destination.id}/assignments/new", status_code=303
+        )
     return _render_assignment_form(
         request,
         db,
@@ -488,6 +215,7 @@ def new_assignment(
     )
 
 
+@router.post("/coordinator/assignments")
 @router.post("/teacher/assignments")
 def create_assignment(
     request: Request,
@@ -506,7 +234,7 @@ def create_assignment(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    classroom = require_teacher_class(db, user, classroom_id)
+    classroom = require_active_class(_staff_class(request, db, user, classroom_id))
     school = db.get(School, classroom.school_id)
     values = {
         "natural_text": natural_text,
@@ -568,6 +296,7 @@ def create_assignment(
             idempotency_key,
             student_ids if targeting_mode == "selected" else None,
             draft=draft,
+            coordinator=_workspace(request) == "coordinator",
         )
         db.commit()
     except (ValidationError, IntegrityError, OperationalError) as exc:
@@ -592,9 +321,10 @@ def create_assignment(
         if assignment.status == "draft"
         else "Assignment published. Check Notifications for delivery updates."
     )
-    return redirect_with_message(f"/teacher/assignments/{assignment.id}", message)
+    return redirect_with_message(assignment_path(assignment, _workspace(request)), message)
 
 
+@router.post("/coordinator/assignments/{assignment_id}/publish")
 @router.post("/teacher/assignments/{assignment_id}/publish")
 def publish_assignment(
     request: Request,
@@ -605,7 +335,9 @@ def publish_assignment(
 ):
     validate_csrf(request, csrf_token)
     try:
-        request.app.state.assignment_service.publish(db, user, assignment_id)
+        assignment = request.app.state.assignment_service.publish(
+            db, user, assignment_id, coordinator=_workspace(request) == "coordinator"
+        )
         db.commit()
     except (ValidationError, IntegrityError, OperationalError) as exc:
         db.rollback()
@@ -616,24 +348,33 @@ def publish_assignment(
         )
         return _render_assignment(request, user, db, assignment_id, errors={"publish": error})
     return redirect_with_message(
-        f"/teacher/assignments/{assignment_id}",
+        assignment_path(assignment, _workspace(request)),
         "Assignment published. Students can open it now. Check Notifications for Telegram delivery.",
     )
 
 
+@router.get(
+    "/coordinator/classes/{class_id}/assignments/{assignment_id}", response_class=HTMLResponse
+)
+@router.get("/teacher/classes/{class_id}/assignments/{assignment_id}", response_class=HTMLResponse)
 @router.get("/teacher/assignments/{assignment_id}", response_class=HTMLResponse)
 def teacher_assignment(
     request: Request,
     assignment_id: int,
+    class_id: int | None = None,
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
-    return _render_assignment(request, user, db, assignment_id)
+    return _render_assignment(request, user, db, assignment_id, class_id=class_id)
 
 
-def _render_assignment(request, user, db, assignment_id, *, errors=None, form=None):
+def _render_assignment(request, user, db, assignment_id, *, class_id=None, errors=None, form=None):
     errors, form = errors or {}, form or {}
-    assignment = require_teacher_assignment(db, user, assignment_id)
+    assignment = require_staff_assignment(
+        db, user, assignment_id, coordinator=_workspace(request) == "coordinator"
+    )
+    if class_id is not None and assignment.classroom_id != class_id:
+        raise NotFoundError("Assignment not found in this class")
     classroom = db.get(Classroom, assignment.classroom_id)
     recipients = list(
         db.scalars(
@@ -681,24 +422,25 @@ def _render_assignment(request, user, db, assignment_id, *, errors=None, form=No
         )
     )
     delivery_keys = {item.idempotency_key: item for item in deliveries if item.idempotency_key}
-    feedback_outcomes = {
-        event.entity_id: event.metadata_json.get("complete")
-        for event in db.scalars(
-            select(ActivityEvent).where(
-                ActivityEvent.entity_type == "feedback",
-                ActivityEvent.event_type == "feedback_sent",
-                ActivityEvent.classroom_id == assignment.classroom_id,
-                ActivityEvent.entity_id.in_([review.id for review in feedback]),
-            )
-        )
-    }
     latest = {}
     for submission in submissions:
         latest.setdefault(submission.student_id, submission.id)
+    enrolled_ids = set(
+        db.scalars(
+            select(ClassMembership.user_id).where(
+                ClassMembership.classroom_id == classroom.id,
+                ClassMembership.role == "student",
+            )
+        )
+    )
     reviewable = {
         latest[state.student_id]
         for state, _ in rows
-        if state.status == "submitted" and state.student_id in latest
+        if not classroom.archived_at
+        and assignment.status == "assigned"
+        and state.status == "submitted"
+        and state.student_id in latest
+        and state.student_id in enrolled_ids
     }
     return render(
         request,
@@ -707,11 +449,19 @@ def _render_assignment(request, user, db, assignment_id, *, errors=None, form=No
         user=user,
         assignment=assignment,
         classroom=classroom,
+        school=db.get(School, classroom.school_id),
+        author=db.get(User, assignment.created_by_user_id),
+        feedback_authors={
+            item.id: item.name
+            for item in db.scalars(
+                select(User).where(User.id.in_({item.teacher_id for item in feedback}))
+            )
+        },
         recipients=recipients,
         student_names={student.id: student.name for student in recipients},
         student_states={state.student_id: state for state, _ in rows},
         delivery_keys=delivery_keys,
-        feedback_outcomes=feedback_outcomes,
+        feedback_outcomes=feedback_outcomes(db, assignment, [review.id for review in feedback]),
         errors=errors,
         form=form,
         state_rows=rows,
@@ -730,6 +480,7 @@ def _render_assignment(request, user, db, assignment_id, *, errors=None, form=No
     )
 
 
+@router.post("/coordinator/assignments/{assignment_id}/deadline")
 @router.post("/teacher/assignments/{assignment_id}/deadline")
 def update_deadline(
     request: Request,
@@ -741,12 +492,19 @@ def update_deadline(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    assignment = require_teacher_assignment(db, user, assignment_id)
+    assignment = require_staff_assignment(
+        db, user, assignment_id, coordinator=_workspace(request) == "coordinator"
+    )
     try:
         deadline = parse_local_deadline(due_at, assignment.timezone)
         changed = deadline != aware_utc(assignment.due_at)
         request.app.state.assignment_service.update_deadline(
-            db, user, assignment_id, deadline, idempotency_key
+            db,
+            user,
+            assignment_id,
+            deadline,
+            idempotency_key,
+            coordinator=_workspace(request) == "coordinator",
         )
         db.commit()
     except (ValidationError, IntegrityError, OperationalError) as exc:
@@ -770,9 +528,10 @@ def update_deadline(
         message = "Draft deadline updated. Reminders will be scheduled when you publish."
     else:
         message = "Deadline updated. The old reminder schedule was replaced. Check Notifications for delivery updates."
-    return redirect_with_message(f"/teacher/assignments/{assignment_id}", message)
+    return redirect_with_message(assignment_path(assignment, _workspace(request)), message)
 
 
+@router.post("/coordinator/assignments/{assignment_id}/instructions")
 @router.post("/teacher/assignments/{assignment_id}/instructions")
 def update_instructions(
     request: Request,
@@ -787,8 +546,13 @@ def update_instructions(
     try:
         if len(instructions) > 5000:
             raise ValidationError("Keep instructions within 5,000 characters.")
-        request.app.state.assignment_service.clarify(
-            db, user, assignment_id, instructions, idempotency_key
+        assignment = request.app.state.assignment_service.clarify(
+            db,
+            user,
+            assignment_id,
+            instructions,
+            idempotency_key,
+            coordinator=_workspace(request) == "coordinator",
         )
         db.commit()
     except (ValidationError, IntegrityError, OperationalError) as exc:
@@ -806,9 +570,12 @@ def update_instructions(
             errors={"instructions": error},
             form={"instructions": instructions, "instructions_key": idempotency_key},
         )
-    return redirect_with_message(f"/teacher/assignments/{assignment_id}", "Instructions updated.")
+    return redirect_with_message(
+        assignment_path(assignment, _workspace(request)), "Instructions updated."
+    )
 
 
+@router.post("/coordinator/assignments/{assignment_id}/cancel")
 @router.post("/teacher/assignments/{assignment_id}/cancel")
 def cancel_assignment(
     request: Request,
@@ -819,18 +586,23 @@ def cancel_assignment(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    assignment = require_teacher_assignment(db, user, assignment_id)
+    assignment = require_staff_assignment(
+        db, user, assignment_id, coordinator=_workspace(request) == "coordinator"
+    )
     was_draft = assignment.status == "draft"
-    request.app.state.assignment_service.cancel(db, user, assignment_id, idempotency_key)
+    request.app.state.assignment_service.cancel(
+        db, user, assignment_id, idempotency_key, coordinator=_workspace(request) == "coordinator"
+    )
     db.commit()
     message = (
         "Draft cancelled. It was never shared with students."
         if was_draft
         else "Assignment cancelled. Future reminders have stopped. Check Notifications for delivery updates."
     )
-    return redirect_with_message(f"/teacher/assignments/{assignment_id}", message)
+    return redirect_with_message(assignment_path(assignment, _workspace(request)), message)
 
 
+@router.post("/coordinator/submissions/{submission_id}/feedback")
 @router.post("/teacher/submissions/{submission_id}/feedback")
 def create_feedback(
     request: Request,
@@ -839,12 +611,18 @@ def create_feedback(
     outcome: str = Form(),
     idempotency_key: str = Form(),
     csrf_token: str = Form(),
+    from_detail: bool = Form(False),
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    submission = require_teacher_submission(db, user, submission_id)
+    submission = require_staff_submission(
+        db, user, submission_id, coordinator=_workspace(request) == "coordinator", write=True
+    )
     assignment_id = submission.assignment_id
+    assignment = db.get(Assignment, assignment_id)
+    if _workspace(request) == "coordinator":
+        coordinator_school(request, db, user, assignment.school_id)
     try:
         if outcome not in {"revision", "complete"}:
             raise ValidationError("Choose Request revision or Mark complete.")
@@ -857,6 +635,7 @@ def create_feedback(
             message,
             complete=outcome == "complete",
             idempotency_key=idempotency_key,
+            coordinator=_workspace(request) == "coordinator",
         )
         event = db.scalar(
             select(ActivityEvent).where(
@@ -873,6 +652,16 @@ def create_feedback(
             if isinstance(exc, (IntegrityError, OperationalError))
             else str(exc)
         )
+        if from_detail:
+            return render_submission(
+                request,
+                user,
+                db,
+                submission_id,
+                error=error,
+                message=message,
+                feedback_key=idempotency_key,
+            )
         return _render_assignment(
             request,
             user,
@@ -890,9 +679,11 @@ def create_feedback(
         complete, "Feedback saved."
     )
     return redirect_with_message(
-        f"/teacher/assignments/{assignment_id}",
+        f"/{_workspace(request)}/submissions/{submission_id}"
+        if from_detail
+        else assignment_path(assignment, _workspace(request)),
         f"{saved} The note is visible to the student. Check Telegram delivery below.",
-        anchor=f"submission-{submission_id}",
+        anchor="review-heading" if from_detail else f"submission-{submission_id}",
     )
 
 

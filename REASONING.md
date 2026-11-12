@@ -4,15 +4,17 @@
 
 The classroom account is the canonical identity. The app links a Telegram numeric ID through a 30-minute, one-time token whose SHA-256 digest is stored. Teachers create student links within their class and create their own links from an authenticated class page. A person who messages before linking is guided to their private connection link. Telegram handles and display names play no role in identifying school accounts. A student who has already linked can send `/join CODE` to join a class in their existing school. `/join CODE EMAIL` is accepted if the email matches that authenticated account. Knowing a class code and someone else’s email cannot establish ownership of their identity. The invite checks expiry, active status, and use count.
 
-Coordinators and teachers can create a class inside a school where they already hold the corresponding school role. The creator receives a teacher class membership. Authorized teachers/coordinators can pre-create a student with a temporary password, add school/class memberships, and create or disable invites. This is enough for the interview scenario without turning the take-home into a school administration suite. Temporary passwords are entered by the operator and never displayed again.
+Coordinators create classes and set up teachers in schools they coordinate. Teaching access comes from an explicit teacher membership for each class. Authorized class staff can pre-create a student with a temporary password, enroll them, and create or disable invites. Temporary passwords are entered by the operator and never displayed again.
 
 ## Roles, access, and privacy
 
-Roles are scoped rows, not global flags. A person can coordinate one school, teach several classes, and share a class with another teacher. Coordinators inherit class access only inside their school; teachers require a class membership. Students require both a student class membership and assignment target. All paths—including Telegram references and file routes—apply the same server-side rules.
+Roles come from current school and class memberships. A person can coordinate one school, teach several classes, and share a class with another teacher. Coordinators manage their own schools and can use classwork and review actions from the Coordinator workspace. The Teacher workspace and Telegram teaching commands require a teacher membership in the class. Students require both a student class membership and an assignment target. Download routes apply the same workspace permissions.
+
+Staffing previews show the existing and proposed team for each affected class and its enrollment and review counts. Confirmation rechecks the signed preview within the SQLite write transaction, applies membership changes together, and records the change in the activity log. Archived classes keep their history and stop accepting new work or generating reminders.
 
 Candidate assignment queries are restricted before title matching. An explicit ID, normalized exact title, title prefix, and full match of meaningful query terms are tried in that order. The model may return a numeric reference only if the sender wrote it as `#ID`. An explicit classroom and qualifiers such as “today’s” narrow the lookup before title matching. Zero matches and tied matches are non-mutating clarification outcomes. This avoids the dangerous pattern of choosing globally and filtering afterward.
 
-`NotificationDelivery` carries school/class/assignment context. Teachers see only deliveries for assigned classes; coordinators can see their school scope. Bodies from another tenant never reach the result set.
+`NotificationDelivery` carries school, class, and assignment context. Teaching views display delivery records for assigned classes. Coordinators can run due reminders for their own schools from the school overview.
 
 ## Lifecycle
 

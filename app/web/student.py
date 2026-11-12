@@ -4,58 +4,97 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
 from app.database import get_db
-from app.exceptions import InvalidStateTransition, ValidationError
+from app.exceptions import InvalidStateTransition, NotFoundError, ValidationError
 from app.models import (
     Assignment,
-    ClassMembership,
     Classroom,
     Feedback,
     NotificationDelivery,
     ProgressEvent,
     Reminder,
+    School,
     StudentAssignmentState,
     Submission,
     User,
 )
 from app.reminders.policy import aware_utc
 from app.services.assignment import get_student_state
-from app.services.authorization import require_student_assignment, require_student_submission
+from app.services.authorization import (
+    class_membership_scope,
+    require_active_class,
+    require_student_assignment,
+    require_student_class,
+    require_student_submission,
+    student_work_scope,
+)
 from app.services.progress import ProgressService
 from app.services.state_machine import TRANSITIONS
 from app.services.submission import SubmissionService
-from app.web.helpers import csrf, operation_key, redirect_with_message, render, web_user
+from app.services.submission_history import feedback_outcomes
+from app.web.helpers import (
+    assignment_path,
+    csrf,
+    operation_key,
+    redirect_with_message,
+    render,
+    web_user,
+)
 
 router = APIRouter()
 
 
 @router.get("/student", response_class=HTMLResponse)
 def student_dashboard(
-    request: Request, user: User = Depends(web_user), db: Session = Depends(get_db)
+    request: Request,
+    class_id: str = "",
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
 ):
-    rows = db.execute(
+    if "student" not in request.state.workspace_roles:
+        raise HTTPException(403, "A student membership is required to open this workspace.")
+    try:
+        selected_id = int(class_id) if class_id else None
+    except ValueError as exc:
+        raise ValidationError("Choose a class from your enrolled classes.") from exc
+    active = require_student_class(db, user, selected_id) if selected_id is not None else None
+    classes = list(
+        db.scalars(
+            select(Classroom)
+            .where(Classroom.id.in_(class_membership_scope(user.id, "student")))
+            .order_by(Classroom.name, Classroom.id)
+        )
+    )
+    schools = {
+        school.id: school
+        for school in db.scalars(
+            select(School).where(School.id.in_({item.school_id for item in classes}))
+        )
+    }
+    assignments = (
         select(Assignment, StudentAssignmentState, Classroom)
         .join(StudentAssignmentState, StudentAssignmentState.assignment_id == Assignment.id)
         .join(Classroom, Classroom.id == Assignment.classroom_id)
-        .join(ClassMembership, ClassMembership.classroom_id == Classroom.id)
         .where(
             StudentAssignmentState.student_id == user.id,
-            ClassMembership.user_id == user.id,
-            ClassMembership.role == "student",
-            Assignment.status != "draft",
+            Assignment.id.in_(student_work_scope(user.id)),
         )
         .order_by(Assignment.due_at, Assignment.id)
-    ).all()
+    )
+    if active:
+        assignments = assignments.where(Assignment.classroom_id == active.id)
+    rows = db.execute(assignments).all()
     actionable = [
         row
         for row in rows
         if row[0].status != "cancelled"
+        and row[2].archived_at is None
         and row[1].status not in {"submitted", "completed", "cancelled"}
     ]
     actionable.sort(key=lambda row: (row[1].status != "needs_revision", row[0].due_at))
@@ -75,6 +114,11 @@ def student_dashboard(
         request,
         "student/dashboard.html",
         user=user,
+        classes=classes,
+        class_names={classroom.id: classroom.name for classroom in classes},
+        active=active,
+        school=schools[active.school_id] if active else None,
+        schools=schools,
         actionable=actionable,
         history=[row for row in rows if row not in actionable],
         feedback=feedback,
@@ -85,21 +129,25 @@ def student_dashboard(
     )
 
 
+@router.get("/student/classes/{class_id}/assignments/{assignment_id}", response_class=HTMLResponse)
 @router.get("/student/assignments/{assignment_id}", response_class=HTMLResponse)
 def student_assignment(
     request: Request,
     assignment_id: int,
+    class_id: int | None = None,
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
-    return _render_assignment(request, user, db, assignment_id)
+    return _render_assignment(request, user, db, assignment_id, class_id=class_id)
 
 
 def _render_assignment(
-    request, user, db, assignment_id, *, errors=None, form=None, status_code=200
+    request, user, db, assignment_id, *, class_id=None, errors=None, form=None, status_code=200
 ):
     errors, form = errors or {}, form or {}
     assignment = require_student_assignment(db, user, assignment_id)
+    if class_id is not None and assignment.classroom_id != class_id:
+        raise NotFoundError("Assignment not found in this class")
     state = get_student_state(db, assignment_id, user.id)
     progress = list(
         db.scalars(
@@ -115,7 +163,7 @@ def _render_assignment(
         db.scalars(
             select(Submission)
             .where(Submission.assignment_id == assignment_id, Submission.student_id == user.id)
-            .order_by(Submission.created_at.desc())
+            .order_by(Submission.id.desc())
         )
     )
     feedback = list(
@@ -148,10 +196,10 @@ def _render_assignment(
             )
         )
     }
-    actions = (
-        TRANSITIONS[state.status] | {state.status} if assignment.status == "assigned" else set()
-    )
-    can_submit = assignment.status == "assigned" and state.status not in {
+    classroom = db.get(Classroom, assignment.classroom_id)
+    open_for_work = assignment.status == "assigned" and classroom.archived_at is None
+    actions = TRANSITIONS[state.status] | {state.status} if open_for_work else set()
+    can_submit = open_for_work and state.status not in {
         "submitted",
         "completed",
         "cancelled",
@@ -160,7 +208,8 @@ def _render_assignment(
         request,
         "student/assignment.html",
         status_code=status_code,
-        classroom=db.get(Classroom, assignment.classroom_id),
+        classroom=classroom,
+        school=db.get(School, classroom.school_id),
         actions=actions,
         can_submit=can_submit,
         errors=errors,
@@ -175,6 +224,14 @@ def _render_assignment(
         reminders=reminders,
         submissions=submissions,
         feedback=feedback,
+        feedback_outcomes=feedback_outcomes(db, assignment, [item.id for item in feedback]),
+        feedback_authors=dict(
+            db.execute(
+                select(User.id, User.name).where(
+                    User.id.in_({item.teacher_id for item in feedback})
+                )
+            ).all()
+        ),
         csrf_token=csrf(request),
         idempotency_key=form.get("idempotency_key") or operation_key("submission"),
         message=request.query_params.get("message"),
@@ -193,7 +250,8 @@ def student_progress(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    require_student_assignment(db, user, assignment_id)
+    assignment = require_student_assignment(db, user, assignment_id)
+    require_active_class(db.get(Classroom, assignment.classroom_id))
     values = {
         "progress_message": message,
         "progress_percent": progress_percent,
@@ -237,7 +295,7 @@ def student_progress(
         "in_progress": "Progress saved.",
     }
     return redirect_with_message(
-        f"/student/assignments/{assignment_id}", success[status], anchor="next-action"
+        assignment_path(assignment, "student"), success[status], anchor="next-action"
     )
 
 
@@ -253,7 +311,8 @@ async def student_submit(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    require_student_assignment(db, user, assignment_id)
+    assignment = require_student_assignment(db, user, assignment_id)
+    require_active_class(db.get(Classroom, assignment.classroom_id))
     settings = request.app.state.settings
     values = {"text_content": text_content, "idempotency_key": idempotency_key}
 
@@ -296,7 +355,7 @@ async def student_submit(
             user,
             assignment_id,
             idempotency_key,
-            text_content=(text_content.strip() or None) if content is None else None,
+            text_content=text_content,
             stored_file_path=stored_path,
             original_filename=original_name,
             mime_type=mime_type,
@@ -313,8 +372,8 @@ async def student_submit(
         if stored_path and not keep_file:
             Path(stored_path).unlink(missing_ok=True)
     return redirect_with_message(
-        f"/student/assignments/{assignment_id}",
-        "Work submitted. Your teacher can review it now.",
+        assignment_path(assignment, "student"),
+        "Work submitted. Your teacher or school coordinator can review it now.",
         anchor=f"submission-{submission.id}",
     )
 

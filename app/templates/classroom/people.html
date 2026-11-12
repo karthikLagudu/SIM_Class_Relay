@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% from "components.html" import teacher_class_nav %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  {% if coordinating %}<a href="/coordinator?school_id={{ school.id }}">{{ school.name }} class directory</a>
+  {% else %}<a href="/teacher">Your classes</a><span aria-hidden="true">/</span><a href="/teacher?class_id={{ classroom.id }}">{{ classroom.name }}</a>{% endif %}
+</nav>
+<header class="hero compact-hero workspace-hero">
+  <div><p class="eyebrow">{{ school.name }}</p><h1>{{ classroom.name }}</h1><p>{{ classroom.grade }} · {{ students|length }} enrolled · {{ school.timezone }}</p></div>
+  <div class="actions">{% if not classroom.archived_at %}<a class="primary button-link" href="#add-student">Add a student</a>{% else %}<span class="badge skipped">Archived</span>{% endif %}{% if coordinating %}<a class="ghost-button button-link" href="{{ class_url }}/work">Classwork &amp; reviews</a>{% endif %}</div>
+</header>
+{% if coordinating %}
+<nav class="section-links" aria-label="Class sections"><a href="#assigned-teachers">Teachers</a><a href="#students">Students</a><a href="#invites">Invitations</a>{% if not classroom.archived_at %}<a href="#class-settings">Class settings</a>{% endif %}<a href="#school-activity">Activity</a></nav>
+<section class="card" id="assigned-teachers" aria-labelledby="assigned-teachers-title">
+  <div class="section-head"><h2 id="assigned-teachers-title">Assigned teachers</h2><a class="ghost-button button-link" href="/coordinator?school_id={{ school.id }}#add-teacher">Set up a teacher</a></div>
+  <div class="list">
+  {% for teacher in teachers %}
+    <div class="list-row"><div><strong><a href="/coordinator/schools/{{ school.id }}/teachers/{{ teacher.id }}">{{ teacher.name }}</a></strong><span>{{ teacher.email }}</span></div></div>
+  {% else %}<p class="notice">No assigned teacher. A coordinator can review this class’s work.</p>{% endfor %}
+  </div>
+  {% if not classroom.archived_at and available_teachers %}
+  <details class="disclosure-inline section-divider">
+    <summary>Manage teaching team</summary>
+    <form method="post" action="/coordinator/staffing/preview" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="school_id" value="{{ school.id }}"><input type="hidden" name="class_id" value="{{ classroom.id }}">
+      <fieldset class="student-picker"><legend>Proposed teaching team</legend>
+        {% for teacher in available_teachers %}<label class="check-row"><input type="checkbox" name="selected_ids" value="{{ teacher.id }}" {% if teacher.id in team_ids %}checked{% endif %}><span>{{ teacher.name }} <small>{{ teacher.email }}</small></span></label>{% endfor %}
+      </fieldset>
+      <p class="field-hint">To replace a teacher, clear their selection and select the incoming teacher. You’ll review the change before it takes effect.</p>
+      <div class="actions"><button class="primary">Review teaching team</button></div>
+    </form>
+  </details>
+  {% endif %}
+</section>
+{% else %}
+{{ teacher_class_nav(classroom, 'students') }}
+<nav class="section-links" aria-label="Student management"><a href="#add-student">Enroll a student</a><a href="#invites">Invitations</a></nav>
+{% endif %}
+<section class="card" id="students" aria-labelledby="students-title">
+  <div class="section-head"><h2 id="students-title">Students &amp; Telegram</h2></div>
+  {% if offline_demo %}<p class="mode-note">Offline demo. Linked accounts can receive simulated deliveries only.</p>{% endif %}
+  {% if errors.get('telegram') %}<div class="error" role="alert">{{ errors.telegram }}</div>{% endif %}
+  {% if not can_link %}<p class="muted">Telegram link generation is unavailable until the bot username is configured. Students can still use the web workspace.</p>{% endif %}
+  <div class="student-roster">
+    {% for student in students %}
+    <article class="student-row" id="student-{{ student.id }}">
+      <div class="student-identity"><strong>{{ student.name }}</strong><span>{{ student.email }}</span></div>
+      <div class="telegram-state">
+        {% if student.telegram_user_id %}
+        <span class="badge sent">Linked</span>
+        {% if not classroom.archived_at %}<details class="disclosure-inline">
+          <summary>Manage link</summary>
+          <form method="post" action="{{ class_url }}/students/{{ student.id }}/telegram-disconnect#students">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <p class="field-hint">Disconnecting stops Telegram notifications for this student.</p>
+            <button class="danger-button">Disconnect Telegram</button>
+          </form>
+        </details>{% endif %}
+        {% else %}
+        <span class="badge {{ 'pending' if active_tokens.get(student.id) else 'skipped' }}">{{ 'Link waiting to be used' if active_tokens.get(student.id) else 'Not linked' }}</span>
+        {% if connection_link and link_student_id == student.id %}
+        <div class="generated-link">
+          <label>One-time link for {{ student.name }} <input value="{{ connection_link.url }}" readonly></label>
+          <p class="field-hint">Copy and share privately. It expires {{ connection_link.expires_at|local_deadline(school.timezone) }}. The link is shown only on this page.</p>
+        </div>
+        {% elif active_tokens.get(student.id) %}
+        <p class="field-hint">Expires {{ active_tokens[student.id].expires_at|local_deadline(school.timezone) }}. Regenerating replaces the previous link.</p>
+        {% endif %}
+        {% if not classroom.archived_at and can_link and not (connection_link and link_student_id == student.id) %}
+        <form method="post" action="{{ class_url }}/students/{{ student.id }}/telegram-link#student-{{ student.id }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="ghost-button" aria-label="{{ 'Regenerate' if active_tokens.get(student.id) else 'Generate' }} Telegram link for {{ student.name }}">{{ 'Regenerate link' if active_tokens.get(student.id) else 'Generate Telegram link' }}</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </div>
+      {% if coordinating and not classroom.archived_at %}
+      <details class="disclosure-inline student-membership">
+        <summary>Change enrollment for {{ student.name }}</summary>
+        <form method="post" action="{{ class_url }}/students/{{ student.id }}/membership/preview" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label>Enrollment change <select name="destination_id" required><option value="">Choose a change</option>{% for destination in destinations %}<option value="{{ destination.id }}">Transfer to {{ destination.name }}</option>{% endfor %}<option value="remove">Remove from this class</option></select></label>
+          <div class="actions"><button class="ghost-button">Review enrollment change</button></div>
+        </form>
+      </details>
+      {% endif %}
+    </article>
+    {% else %}<p class="empty">No students enrolled yet. Add a student below to get started.</p>{% endfor %}
+  </div>
+  {% if not coordinating and not user.telegram_user_id and can_link %}
+  <form method="post" action="{{ class_url }}/connect-telegram" class="section-divider">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="ghost-button">Connect my Telegram</button>
+  </form>
+  {% endif %}
+</section>
+
+<div class="grid two-one">
+  {% if not classroom.archived_at %}
+  <section class="card" id="add-student" aria-labelledby="student-create-title">
+    <h2 id="student-create-title">Add a student</h2>
+    <form method="post" action="{{ class_url }}/students#add-student" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if errors.get('student') %}<div class="error" id="student-error" role="alert">{{ errors.student }} Re-enter the temporary password if you are creating an account.</div>{% endif %}
+      <label>Student name <input name="name" value="{{ form.get('name','') }}" required {% if errors.get('student') %}aria-describedby="student-error"{% endif %}></label>
+      <label>Email <input type="email" name="email" value="{{ form.get('email','') }}" required {% if errors.get('student') %}aria-describedby="student-error"{% endif %}></label>
+      <label>Temporary password <input type="password" name="temporary_password" minlength="10" autocomplete="new-password" aria-describedby="student-password-hint{% if errors.get('student') %} student-error{% endif %}"></label>
+      <p id="student-password-hint" class="field-hint">For a new account, enter at least 10 characters and share it privately. Existing students keep their password.</p>
+      <div class="actions"><button class="primary">Enroll student</button></div>
+    </form>
+  </section>
+  {% endif %}
+  <section class="card" id="invites" aria-labelledby="invites-title">
+    <h2 id="invites-title">Class invitations</h2>
+    <p class="muted">Students who have already linked Telegram can join with <code>/join CODE</code>. To connect an account for the first time, generate a personal link in the roster.</p>
+    {% if not classroom.archived_at %}<form method="post" action="{{ class_url }}/invites#invites" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if errors.get('invite') %}<div class="error" id="invite-error" role="alert">{{ errors.invite }}</div>{% endif %}
+      <div class="form-grid">
+        <label>Expires after (days)<input type="number" name="expires_in_days" value="{{ form.get('expires_in_days',7) }}" min="1" max="365" required {% if errors.get('invite') %}aria-describedby="invite-error"{% endif %}></label>
+        <label>Maximum uses<input type="number" name="max_uses" value="{{ form.get('max_uses',20) }}" min="1" required {% if errors.get('invite') %}aria-describedby="invite-error"{% endif %}></label>
+      </div>
+      <div class="actions"><button class="ghost-button">Generate invite</button></div>
+    </form>{% endif %}
+    <div class="list">
+    {% for invite in invites %}
+    {% set invite_status = 'Class archived' if classroom.archived_at else 'Disabled' if not invite.active else 'Expired' if invite.id in expired_invites else 'All uses taken' if invite.max_uses is not none and invite.use_count >= invite.max_uses else 'Active' %}
+    <div class="list-row">
+      <div><strong><code>{{ invite.code }}</code></strong><b class="badge {{ 'sent' if invite_status == 'Active' else 'skipped' }}">{{ invite_status }}</b>
+        <span>{{ invite.use_count }} {{ ('of ' ~ invite.max_uses) if invite.max_uses is not none }} used</span>
+        <span>{{ (('Expired ' if invite_status == 'Expired' else 'Expires ') ~ (invite.expires_at|local_deadline(school.timezone))) if invite.expires_at else 'No expiry' }}</span>
+      </div>
+      {% if invite_status == 'Expired' %}<p class="field-hint">Generate a new invite above to replace this code.</p>{% endif %}
+      {% if invite_status == 'Active' %}<form method="post" action="/{{ workspace }}/invites/{{ invite.id }}/disable#invites"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="ghost-button" aria-label="Disable invite {{ invite.code }}">Disable</button></form>{% endif %}
+    </div>
+    {% else %}<p class="empty">No invite codes yet.</p>{% endfor %}
+    </div>
+  </section>
+</div>
+{% if coordinating %}
+{% if not classroom.archived_at %}
+<section class="card stack" id="class-settings">
+  <h2>Class settings</h2>
+  {% if errors.get('class') %}<p class="error" role="alert">{{ errors.class }}</p>{% endif %}
+  <form method="post" action="{{ class_url }}/edit#class-settings" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-grid"><label>Class name <input name="name" maxlength="160" value="{{ form.get('class_name', classroom.name) }}" required></label><label>Grade <input name="grade" maxlength="80" value="{{ form.get('grade', classroom.grade) }}" required></label></div>
+    <div class="actions"><button class="ghost-button">Save class details</button></div>
+  </form>
+  <details class="disclosure-inline section-divider"><summary>Archive class</summary>
+    <form method="post" action="{{ class_url }}/archive" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p>Archiving stops class changes and reminders. Coordinators can review the class history, and students can read their existing work.</p>
+      <label class="check-row"><input type="checkbox" name="confirmed" value="true" required><span>Confirm that this class should be archived.</span></label>
+      <div class="actions"><button class="danger-button">Archive class</button></div>
+    </form>
+  </details>
+</section>
+{% endif %}
+{% include 'coordinator/activity.html' %}
+{% endif %}
+{% endblock %}

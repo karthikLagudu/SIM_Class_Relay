@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/coordinator?school_id={{ school.id }}">{{ school.name }} overview</a></nav>
+<header class="hero compact-hero workspace-hero"><div><p class="eyebrow">{{ school.name }}</p><h1>Student directory</h1><p>Find students and manage their class enrollments.</p></div><a class="primary button-link" href="#add-school-student">Add a student</a></header>
+<section class="card stack" aria-label="School students">
+  <form class="scope-picker directory-filter" method="get" action="/coordinator/schools/{{ school.id }}/students">
+    <div><label for="student-query">Student name or email</label><input id="student-query" name="q" type="search" value="{{ query }}"></div>
+    <div><label for="student-class-filter">Class</label><select id="student-class-filter" name="class_filter"><option value="">All students</option><option value="unassigned" {% if filter_by == 'unassigned' %}selected{% endif %}>Unassigned</option>{% for classroom in classes %}<option value="{{ classroom.id }}" {% if filter_by == classroom.id|string %}selected{% endif %}>{{ classroom.name }}</option>{% endfor %}</select></div>
+    <button class="ghost-button">Filter students</button>
+    {% if query or filter_by %}<a class="ghost-button button-link" href="/coordinator/schools/{{ school.id }}/students">Clear filters</a>{% endif %}
+  </form>
+  <p class="field-hint">Open a class to transfer a student, end an enrollment, or manage Telegram linking.</p>
+  {% if students %}
+  <table class="roster-table" role="table" aria-label="Students and enrollment">
+    <thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col">Student</th><th role="columnheader" scope="col">Enrolled classes</th><th role="columnheader" scope="col">Telegram</th><th role="columnheader" scope="col">Enrollment</th></tr></thead>
+    <tbody role="rowgroup">
+  {% for student in students %}
+    {% set enrolled = enrollments[student.id] %}
+    {% set enrolled_ids = enrolled|map(attribute='id')|list %}
+    {% set available = classes|rejectattr('id', 'in', enrolled_ids)|list %}
+    <tr role="row" id="student-{{ student.id }}">
+      <th role="rowheader" scope="row"><span class="roster-name">{{ student.name }}</span><span class="roster-secondary">{{ student.email }}</span></th>
+      <td role="cell"><span class="cell-label">Enrolled classes</span><ul class="roster-classes">{% for classroom in enrolled %}<li><a href="/coordinator/classes/{{ classroom.id }}#student-{{ student.id }}">{{ classroom.name }}</a></li>{% else %}<li>Unassigned</li>{% endfor %}</ul></td>
+      <td role="cell"><span class="cell-label">Telegram</span><span class="badge {{ 'sent' if student.telegram_user_id else 'skipped' }}">{{ 'Telegram linked' if student.telegram_user_id else 'Telegram not linked' }}</span></td>
+      <td role="cell"><span class="cell-label">Enrollment</span>
+      {% if available %}<details class="disclosure-inline"><summary>Enroll in another class</summary>
+        <form class="stack" method="post" action="/coordinator/schools/{{ school.id }}/students/{{ student.id }}/enroll">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label>Class for {{ student.name }} <select name="class_id" required><option value="">Choose a class</option>{% for classroom in available %}<option value="{{ classroom.id }}">{{ classroom.name }}</option>{% endfor %}</select></label>
+          <div class="actions"><button class="ghost-button">Enroll student</button></div>
+        </form>
+      </details>{% else %}<span class="roster-secondary">No additional classes available</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">No students match these filters. Try clearing the filters or searching for a different name.</p>{% endif %}
+</section>
+<section class="card stack" id="add-school-student" aria-labelledby="add-school-student-title">
+  <h2 id="add-school-student-title">Add a student to {{ school.name }}</h2>
+  <p class="field-hint">Create the account here, then enroll the student from the directory.</p>
+  {% if error %}<p class="error" id="student-create-error" role="alert">{{ error }} Re-enter the temporary password before saving.</p>{% endif %}
+  <form method="post" action="/coordinator/schools/{{ school.id }}/students#add-school-student" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-grid">
+      <label>Student name <input name="name" value="{{ form.get('name', '') }}" maxlength="160" required {% if error %}aria-describedby="student-create-error"{% endif %}></label>
+      <label>Email <input name="email" type="email" value="{{ form.get('email', '') }}" maxlength="254" required {% if error %}aria-describedby="student-create-error"{% endif %}></label>
+      <label>Temporary password <input name="temporary_password" type="password" minlength="10" autocomplete="new-password" required {% if error %}aria-describedby="student-create-error"{% endif %}></label>
+    </div>
+    <div class="actions"><button class="primary">Create student account</button></div>
+  </form>
+</section>
+{% endblock %}

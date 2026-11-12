@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Assignment, AssignmentTarget, Reminder
+from app.models import Assignment, AssignmentTarget, ClassMembership, Reminder
 
 
 class ReminderScheduler:
@@ -22,8 +22,12 @@ class ReminderScheduler:
         due = assignment.due_at.replace(tzinfo=assignment.due_at.tzinfo or UTC)
         student_ids = list(
             db.scalars(
-                select(AssignmentTarget.student_id).where(
-                    AssignmentTarget.assignment_id == assignment.id
+                select(AssignmentTarget.student_id)
+                .join(ClassMembership, ClassMembership.user_id == AssignmentTarget.student_id)
+                .where(
+                    AssignmentTarget.assignment_id == assignment.id,
+                    ClassMembership.classroom_id == assignment.classroom_id,
+                    ClassMembership.role == "student",
                 )
             )
         )

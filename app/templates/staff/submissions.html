@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% from "components.html" import review_badge %}
+{% block content %}
+{% set coordinating = workspace == 'coordinator' %}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  {% if coordinating %}<a href="/coordinator?school_id={{ school.id }}">{{ school.name }}</a>
+  {% else %}<a href="/teacher">Your classes</a>{% if classroom %}<span aria-hidden="true">/</span><a href="/teacher?class_id={{ classroom.id }}">{{ classroom.name }}</a>{% endif %}{% endif %}
+</nav>
+<header class="hero compact-hero workspace-hero">
+  <div>
+    <p class="eyebrow">{{ school.name if coordinating else classroom.name if classroom else 'Your assigned classes' }}</p>
+    <h1>{{ 'School submissions' if coordinating else 'Needs review' }}</h1>
+    <p>{{ 'Find work and review history across this school.' if coordinating else 'Latest submissions awaiting feedback in your assigned classes.' }}</p>
+  </div>
+</header>
+
+<section class="card" aria-labelledby="submission-results">
+  {% if coordinating %}
+  <form class="submission-filters" method="get" action="/{{ workspace }}/submissions" aria-label="Filter submissions">
+    <input type="hidden" name="school_id" value="{{ school.id }}">
+    <label>Class
+      <select name="class_id">
+        <option value="0">All classes</option>
+        {% for item in classes %}<option value="{{ item.id }}" {% if item.id == class_id %}selected{% endif %}>{{ item.name }}{{ ' (archived)' if item.archived_at else '' }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Assignment
+      <select name="assignment_id">
+        <option value="0">All assignments</option>
+        {% for item in assignments %}<option value="{{ item.id }}" {% if item.id == assignment_id %}selected{% endif %}>{{ item.title }} · {{ class_names[item.classroom_id] }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Student
+      <select name="student_id">
+        <option value="0">All students with submissions</option>
+        {% for item in students %}<option value="{{ item.id }}" {% if item.id == student_id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Review status
+      <select name="status">
+        <option value="">All statuses</option>
+        {% for key, label in review_statuses.items() %}<option value="{{ key }}" {% if key == status %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="actions">
+      <button class="primary">Filter submissions</button>
+      {% if class_id or assignment_id or student_id or status %}<a class="ghost-button button-link" href="/coordinator/submissions?school_id={{ school.id }}">Clear filters</a>{% endif %}
+    </div>
+  </form>
+  {% endif %}
+  <h2 id="submission-results">{{ rows|length }} {{ 'submission' if rows|length == 1 else 'submissions' }}</h2>
+  <div class="list">
+    {% for row in rows %}
+    <a class="list-row submission-row" href="/{{ workspace }}/submissions/{{ row.id }}">
+      <div><strong>{{ row.student_name }}</strong><span>{{ row.assignment_title }} · {{ row.class_name }}{{ ' (archived)' if row.archived_at else '' }}</span>
+      <span>Submitted {{ row.created_at|local_deadline(row.timezone) }}{% if coordinating %} · {{ 'Latest attempt' if row.latest else 'Earlier attempt' }}{% endif %}</span></div>
+      {{ review_badge(row.review_status) }}
+    </a>
+    {% else %}
+    <p class="empty">{% if not coordinating and not classes %}Ask your coordinator to assign you to a class to receive submissions here.
+      {% elif coordinating and (class_id or assignment_id or student_id or status) %}No submissions match these filters. Clear or adjust them to see more work.
+      {% elif coordinating %}This school has no submissions yet. Work appears here when students submit it.
+      {% else %}No submissions are awaiting review here. Check again when students turn in new work.{% endif %}</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

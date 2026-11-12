@@ -1,0 +1,12 @@
+<section class="card" id="school-activity" aria-labelledby="activity-heading">
+  <h2 id="activity-heading">Management activity</h2>
+  <div class="list">
+  {% for item in activity %}
+    <div class="list-row"><div>
+      <strong>{{ item.label }}{% if item.subject %} · {{ item.subject }}{% endif %}</strong>
+      <span>{{ item.actor or 'System' }}{% if item.class_name %} · {{ item.class_name }}{% endif %} · {{ item.event.created_at|local_deadline(school.timezone) }}</span>
+      {% if item.event.event_type == 'teaching_team_changed' %}<span>{{ item.before|join(', ') or 'Unassigned' }} → {{ item.after|join(', ') or 'Unassigned' }}</span>{% endif %}
+    </div></div>
+  {% else %}<p class="empty">Changes to class management and access will appear here.</p>{% endfor %}
+  </div>
+</section>

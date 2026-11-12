@@ -57,13 +57,14 @@ def test_teacher_class_picker_only_shows_authorized_classes(client, app, data):
     response = client.get("/teacher")
 
     assert response.status_code == 200
-    assert 'for="active-class"' in response.text
-    assert f'<option value="{data["class1"].id}" selected>' in response.text
-    assert f'<option value="{data["class2"].id}"' not in response.text
+    assert "Your classes" in response.text
+    assert f'href="/teacher?class_id={data["class1"].id}"' in response.text
+    assert f'href="/teacher?class_id={data["class2"].id}"' not in response.text
     assert client.get(f"/teacher?class_id={data['class2'].id}").status_code == 403
-    assert f'href="/teacher/classes/{data["class1"].id}"' in response.text
+    assert f'href="/teacher/classes/{data["class1"].id}#students"' in client.get(
+        f"/teacher?class_id={data['class1'].id}"
+    ).text
     assert data["class1"].name in response.text
-    assert f'href="/teacher/classes/{data["class2"].id}"' not in response.text
 
 
 def test_coordinator_creates_scoped_teacher_profile(client, app, db, data):

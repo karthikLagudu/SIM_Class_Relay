@@ -17,12 +17,14 @@ logger = logging.getLogger(__name__)
 # existing SQLite database. Keep these upgrades additive and idempotent so a
 # developer can pull a newer version without deleting their local data.
 _SQLITE_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "classrooms": {"archived_at": "DATETIME"},
     "assignments": {
         "schedule_version": "INTEGER NOT NULL DEFAULT 1",
     },
     "feedback": {
         "idempotency_key": "VARCHAR(160)",
     },
+    "submissions": {"instructions_at_submission": "TEXT"},
     "notification_deliveries": {
         "school_id": "INTEGER REFERENCES schools(id) ON DELETE CASCADE",
         "classroom_id": "INTEGER REFERENCES classrooms(id) ON DELETE CASCADE",

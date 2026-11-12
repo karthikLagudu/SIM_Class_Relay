@@ -23,6 +23,7 @@ class TelegramAttachment(BaseModel):
     filename: str | None = Field(default=None, max_length=1024)
     mime_type: str | None = Field(default=None, max_length=255)
     file_size: int | None = Field(default=None, ge=0)
+    caption: str | None = Field(default=None, max_length=10000)
 
     @classmethod
     def from_message(cls, message: dict) -> TelegramAttachment | None:
@@ -37,6 +38,7 @@ class TelegramAttachment(BaseModel):
                 filename=item.get("file_name") if document else "telegram-photo.jpg",
                 mime_type=item.get("mime_type") if document else "image/jpeg",
                 file_size=item.get("file_size"),
+                caption=message.get("caption"),
             )
         except SchemaError as exc:
             raise ValidationError("The attachment details are incomplete or invalid") from exc
@@ -104,6 +106,7 @@ class TelegramFileService:
                 user,
                 assignment_id,
                 f"telegram:{update_id}:submission",
+                text_content=attachment.caption,
                 telegram_file_id=attachment.file_id,
                 stored_file_path=stored.path,
                 original_filename=stored.original_filename,

@@ -78,6 +78,7 @@ class Classroom(Base):
     name: Mapped[str] = mapped_column(String(160))
     grade: Mapped[str] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ClassMembership(Base):
@@ -197,6 +198,7 @@ class Submission(Base):
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     submission_type: Mapped[str] = mapped_column(String(24))
     text_content: Mapped[str | None] = mapped_column(Text)
+    instructions_at_submission: Mapped[str | None] = mapped_column(Text)
     telegram_file_id: Mapped[str | None] = mapped_column(String(240))
     stored_file_path: Mapped[str | None] = mapped_column(String(500))
     original_filename: Mapped[str | None] = mapped_column(String(240))

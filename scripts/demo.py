@@ -130,7 +130,7 @@ def run_demo(base_url: str) -> None:
             assert outcome["result"] == f"progress:{assignment_id}:{state}", outcome
 
         reminder_path = "/teacher/reminders/run"
-        dashboard = teacher.get("/teacher").raise_for_status().text
+        dashboard = teacher.get("/teacher", params={"class_id": 1}).raise_for_status().text
         form = HiddenFields(dashboard, reminder_path).fields
         teacher.post(reminder_path, data=form, follow_redirects=True).raise_for_status()
         detail = teacher.get(detail_url).raise_for_status().text

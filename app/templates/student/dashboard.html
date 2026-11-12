@@ -1,38 +1,70 @@
 {% extends "base.html" %}
 {% block content %}
-<header class="hero compact-hero workspace-hero">
-  <div><h1>My assignments</h1><p>{{ actionable|length }} {{ 'assignment needs' if actionable|length == 1 else 'assignments need' }} your attention.</p></div>
+<header class="hero workspace-hero student-welcome">
+  <div>
+    <p class="eyebrow">{{ active.name if active else 'My assignments' }}{% if active %} · {{ active.grade }}{% endif %}</p>
+    <h1>What’s next?</h1>
+    {% if classes %}<p>{% if actionable %}{{ actionable|length }} {{ 'assignment to work on' if actionable|length == 1 else 'assignments to work on' }}.{% else %}You’re caught up here.{% endif %}</p>{% endif %}
+  </div>
+  <img src="{{ url_for('static', path='/images/student-notebook.webp') }}" width="480" height="480" alt="">
 </header>
-<div class="grid two-one priority-grid">
-  <section class="card" aria-labelledby="action-title">
-    <h2 id="action-title">Upcoming work and next steps</h2>
-    <div class="list">
+
+{% if classes %}
+<form class="scope-picker" method="get" action="/student">
+  <label for="student-class">Filter by class</label>
+  <select id="student-class" name="class_id">
+    <option value="">All enrolled classes</option>
+    {% for classroom in classes %}<option value="{{ classroom.id }}" {% if active and active.id == classroom.id %}selected{% endif %}>{{ classroom.name }} · {{ classroom.grade }}</option>{% endfor %}
+  </select>
+  <button class="ghost-button">Show assignments</button>
+</form>
+
+<div class="grid two-one priority-grid student-work-grid">
+  <section aria-labelledby="action-title">
+    <h2 id="action-title">To do</h2>
+    <div class="stack">
     {% for assignment, state, classroom in actionable %}
-      <a class="list-row" href="/student/assignments/{{ assignment.id }}">
-        <div><strong>{{ assignment.title }}</strong><span>{{ classroom.name }} · Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</span>
-          <span class="row-action">{{ 'Read feedback and resubmit' if state.status == 'needs_revision' else 'Read instructions and acknowledge' if state.status == 'assigned' else 'Open assignment' }}</span></div>
-        <span class="badge {{ state.status }}">{{ state.status|student_status }}</span>
-      </a>
-    {% else %}<p class="empty">No assignments need action right now. Check feedback or your submission history below.</p>{% endfor %}
+      {% set revision = state.status == 'needs_revision' %}
+      {% set blocked = state.status == 'blocked' %}
+      <article class="student-work-card {{ 'student-work-support' if revision or blocked or state.status == 'overdue' else 'student-work-featured' if loop.first else '' }}">
+        <span class="student-work-icon" aria-hidden="true">{{ '↻' if revision else '?' if blocked else '✎' }}</span>
+        <div class="student-work-main">
+          <p class="student-work-class">{{ classroom.name }} · {{ schools[classroom.school_id].name }}</p>
+          <h3>{{ assignment.title }}</h3>
+          <p class="student-work-deadline"><span aria-hidden="true">◷</span> Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</p>
+          {% if revision %}<p>Use your teacher’s feedback to improve your work and send it again.</p>{% endif %}
+        </div>
+        <div class="student-work-actions">
+          <span class="badge {{ state.status }}">{{ state.status|student_status }}</span>
+          <a class="{{ 'primary' if loop.first else 'ghost-button' }} button-link" href="{{ assignment|assignment_path('student') }}">{{ 'Read feedback and resubmit' if revision else 'Start assignment' if state.status == 'assigned' else 'Open assignment' }}</a>
+        </div>
+      </article>
+    {% else %}
+      <p class="empty student-empty"><span aria-hidden="true">✓</span> Nothing to do here right now. You can check your feedback or look at work you’ve sent.</p>
+    {% endfor %}
     </div>
   </section>
-  <section class="card" aria-labelledby="feedback-title">
+  <section class="card student-feedback" id="latest-feedback" aria-labelledby="feedback-title">
     <h2 id="feedback-title">Latest feedback</h2>
     <div class="list">
       {% for item in feedback %}
-      <a class="list-row" href="/student/assignments/{{ item.assignment_id }}#feedback">
-        <div><strong>{{ assignments[item.assignment_id].title }}</strong><span>{{ item.message|truncate(100) }}</span></div>
+      <a class="list-row" href="{{ assignments[item.assignment_id]|assignment_path('student') }}#feedback">
+        <div><strong>{{ assignments[item.assignment_id].title }}</strong><span>{{ class_names[assignments[item.assignment_id].classroom_id] }}</span><span>{{ item.message|truncate(100) }}</span></div>
+        <span class="row-action">Read feedback</span>
       </a>
-      {% else %}<p class="empty">Feedback from your teacher will appear here after they review your work.</p>{% endfor %}
+      {% else %}<p class="empty">Your teacher’s feedback will show up here after they review your work.</p>{% endfor %}
     </div>
   </section>
 </div>
-<section class="card" aria-labelledby="history-title">
+<section class="card" id="submitted-work" aria-labelledby="history-title">
   <h2 id="history-title">Submitted and closed</h2>
   <div class="list">
   {% for assignment, state, classroom in history %}
-    <a class="list-row" href="/student/assignments/{{ assignment.id }}"><div><strong>{{ assignment.title }}</strong><span>{{ classroom.name }} · {{ 'Waiting for teacher review' if state.status == 'submitted' else 'View assignment history' }}</span></div><span class="badge {{ state.status }}">{{ state.status|student_status }}</span></a>
-  {% else %}<p class="empty">No submitted or closed assignments yet.</p>{% endfor %}
+    <a class="list-row" href="{{ assignment|assignment_path('student') }}"><div><strong>{% if state.status == 'completed' %}<span class="completed-star" aria-hidden="true">★</span> {% endif %}{{ assignment.title }}</strong><span>{{ classroom.name }} · {{ 'Waiting for teacher review' if state.status == 'submitted' else 'View assignment history' }}</span></div><span class="badge {{ state.status }}">{{ state.status|student_status }}</span></a>
+  {% else %}<p class="empty">No work to show here yet. When you submit an assignment, you can find it here.</p>{% endfor %}
   </div>
 </section>
+{% else %}
+<section class="card"><p class="empty">Ask your teacher or school coordinator to add you to a class so you can see your assignments.</p></section>
+{% endif %}
 {% endblock %}

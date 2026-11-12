@@ -6,12 +6,13 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Assignment, ClassMembership, StudentAssignmentState, User
+from app.models import Assignment, ClassMembership, Classroom, StudentAssignmentState, User
 from app.services.authorization import teacher_class_scope
 
 
 @dataclass(frozen=True)
 class RiskItem:
+    classroom_id: int
     student_id: int
     student_name: str
     assignment_id: int
@@ -41,6 +42,14 @@ class RiskService:
         *,
         classroom_id: int | None = None,
     ) -> list[RiskItem]:
+        scope = teacher_class_scope(actor.id)
+        if classroom_id is not None:
+            scope = scope.where(Classroom.id == classroom_id)
+        return self.for_classes(db, scope, now)
+
+    def for_classes(
+        self, db: Session, classroom_ids, now: datetime | None = None
+    ) -> list[RiskItem]:
         now = now or datetime.now(UTC)
         query = (
             select(StudentAssignmentState, User, Assignment)
@@ -49,13 +58,11 @@ class RiskService:
             .join(ClassMembership, ClassMembership.classroom_id == Assignment.classroom_id)
             .where(
                 Assignment.status == "assigned",
-                Assignment.classroom_id.in_(teacher_class_scope(actor.id)),
+                Assignment.classroom_id.in_(classroom_ids),
                 ClassMembership.user_id == StudentAssignmentState.student_id,
                 ClassMembership.role == "student",
             )
         )
-        if classroom_id is not None:
-            query = query.where(Assignment.classroom_id == classroom_id)
         rows = db.execute(query).all()
         result: list[RiskItem] = []
         for state, student, assignment in rows:
@@ -93,6 +100,7 @@ class RiskService:
             level = "critical" if score >= 80 else "high" if score >= 60 else "medium"
             result.append(
                 RiskItem(
+                    classroom_id=assignment.classroom_id,
                     student_id=student.id,
                     student_name=student.name,
                     assignment_id=assignment.id,

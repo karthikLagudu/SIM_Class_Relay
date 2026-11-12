@@ -152,7 +152,7 @@ def test_dashboard_hides_cross_school_delivery(client, app, db, data):
     )
     db.commit()
     authenticate(client, app, data["teacher1"].id)
-    response = client.get("/teacher")
+    response = client.get(f"/teacher?class_id={data['class1'].id}")
     assert response.status_code == 200
     assert secret not in response.text
 

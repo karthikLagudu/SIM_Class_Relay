@@ -24,6 +24,7 @@ from app.services.authorization import (
     list_teacher_classes,
     require_student_assignment,
     require_teacher_class,
+    student_work_scope,
 )
 from app.services.invite import InviteService
 from app.services.notification import NotificationService
@@ -135,7 +136,10 @@ class TelegramService:
         message: dict,
         update_id: int,
     ) -> str:
-        parts = shlex.split(text) if text.startswith("/") else []
+        command_word = text.split(maxsplit=1)[0].lower().split("@", 1)[0] if text else ""
+        parts = text.split(maxsplit=2) if command_word == "/submit" else (
+            shlex.split(text) if text.startswith("/") else []
+        )
         command = parts[0].lower().split("@", 1)[0] if parts else ""
         if command == "/start":
             if len(parts) == 1:
@@ -260,13 +264,17 @@ class TelegramService:
                 user,
                 chat_id,
                 f"Created #{assignment.id}: {assignment.title}, due {assignment.due_at}.",
-                kind="assignment_created",
+                kind="teacher_confirmation",
+                school_id=assignment.school_id,
+                classroom_id=assignment.classroom_id,
+                assignment_id=assignment.id,
             )
             return f"assignment:{assignment.id}"
         if command in {"/ack", "/progress", "/blocked"}:
             if len(parts) < 2:
                 return "missing_assignment_id"
             assignment_id = int(parts[1])
+            require_student_assignment(db, user, assignment_id)
             status = {"/ack": "acknowledged", "/progress": "in_progress", "/blocked": "blocked"}[
                 command
             ]
@@ -298,9 +306,13 @@ class TelegramService:
             assignment_id = int(parts[1])
             require_student_assignment(db, user, assignment_id)
             attachment = TelegramAttachment.from_message(message)
-            body = " ".join(parts[2:]) or None
+            body = parts[2] if len(parts) > 2 else None
             if attachment:
-                return self.intent_router.student.submit_attachment(db, user, chat_id, assignment_id, attachment, update_id)
+                if not message.get("text"):
+                    attachment = attachment.model_copy(update={"caption": body})
+                return self.intent_router.student.submit_attachment(
+                    db, user, chat_id, assignment_id, attachment, update_id
+                )
             if not body:
                 self.intent_router.context.set(db, user, chat_id, assignment_id=assignment_id, pending_action="submission")
                 self.client.send(db, user, chat_id, f"Send a photo or file, or type /submit {assignment_id} followed by your answer.", kind="submission_prompt")
@@ -342,7 +354,7 @@ class TelegramService:
             rows = db.execute(
                 select(Assignment, StudentAssignmentState)
                 .join(StudentAssignmentState, StudentAssignmentState.assignment_id == Assignment.id)
-                .where(StudentAssignmentState.student_id == user.id)
+                .where(StudentAssignmentState.student_id == user.id, Assignment.id.in_(student_work_scope(user.id)))
             ).all()
             summary = (
                 "\n".join(f"#{a.id} {a.title}: {student_status(s.status)}, due {self.notifications.format_deadline(a.due_at, a.timezone)}" for a, s in rows)

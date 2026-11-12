@@ -17,7 +17,12 @@ from app.models import (
     User,
 )
 from app.reminders.scheduler import ReminderScheduler
-from app.services.authorization import require_teacher_assignment, require_teacher_class
+from app.services.authorization import (
+    require_active_class,
+    require_coordinator_class,
+    require_staff_assignment,
+    require_teacher_class,
+)
 from app.services.notification import NotificationService
 from app.services.overdue import OverdueService
 from app.services.state_machine import transition
@@ -41,15 +46,21 @@ class AssignmentService:
         student_ids: list[int] | None = None,
         *,
         draft: bool = False,
+        coordinator: bool = False,
     ) -> Assignment:
-        classroom = require_teacher_class(db, actor, classroom_id)
+        require = require_coordinator_class if coordinator else require_teacher_class
+        classroom = require_active_class(require(db, actor, classroom_id))
         key = idempotency_key or f"assignment:{uuid.uuid4()}"
         existing_key = db.get(IdempotencyKey, key)
         if existing_key:
             if existing_key.operation != "create_assignment" or not existing_key.result_reference:
                 raise ValidationError("This operation key was already used")
             existing = db.get(Assignment, int(existing_key.result_reference))
-            if not existing or existing.classroom_id != classroom_id or existing.created_by_user_id != actor.id:
+            if (
+                not existing
+                or existing.classroom_id != classroom_id
+                or existing.created_by_user_id != actor.id
+            ):
                 raise ValidationError("This operation key was already used")
             return existing
         if due_at.tzinfo is None:
@@ -114,36 +125,59 @@ class AssignmentService:
 
     def _activate(self, db: Session, assignment: Assignment, student_ids: list[int]) -> None:
         for student_id in student_ids:
-            db.add(StudentAssignmentState(
-                assignment_id=assignment.id, student_id=student_id, status="assigned",
-            ))
+            db.add(
+                StudentAssignmentState(
+                    assignment_id=assignment.id,
+                    student_id=student_id,
+                    status="assigned",
+                )
+            )
         db.flush()
         self.scheduler.schedule_assignment(db, assignment)
         if self.notifications:
             self.notifications.notify_assignment_created(db, assignment)
 
-    def publish(self, db: Session, actor: User, assignment_id: int) -> Assignment:
-        assignment = require_teacher_assignment(db, actor, assignment_id)
+    def publish(
+        self, db: Session, actor: User, assignment_id: int, *, coordinator: bool = False
+    ) -> Assignment:
+        assignment = require_staff_assignment(
+            db, actor, assignment_id, coordinator=coordinator, write=True
+        )
         if assignment.status == "assigned":
             return assignment
         if assignment.status != "draft":
             raise ValidationError("Only drafts can be published")
         if assignment.due_at.replace(tzinfo=assignment.due_at.tzinfo or UTC) <= datetime.now(UTC):
             raise ValidationError("Set a future deadline before publishing")
-        students = list(db.scalars(select(AssignmentTarget.student_id).where(
-            AssignmentTarget.assignment_id == assignment.id,
-        )))
-        enrolled = set(db.scalars(select(ClassMembership.user_id).where(
-            ClassMembership.classroom_id == assignment.classroom_id, ClassMembership.role == "student",
-        )))
+        students = list(
+            db.scalars(
+                select(AssignmentTarget.student_id).where(
+                    AssignmentTarget.assignment_id == assignment.id,
+                )
+            )
+        )
+        enrolled = set(
+            db.scalars(
+                select(ClassMembership.user_id).where(
+                    ClassMembership.classroom_id == assignment.classroom_id,
+                    ClassMembership.role == "student",
+                )
+            )
+        )
         if not students or not set(students).issubset(enrolled):
             raise ValidationError("The draft recipients must still be enrolled in this class")
         assignment.status = "assigned"
-        db.add(ActivityEvent(
-            school_id=assignment.school_id, classroom_id=assignment.classroom_id,
-            actor_user_id=actor.id, event_type="assignment_published", entity_type="assignment",
-            entity_id=assignment.id, metadata_json={},
-        ))
+        db.add(
+            ActivityEvent(
+                school_id=assignment.school_id,
+                classroom_id=assignment.classroom_id,
+                actor_user_id=actor.id,
+                event_type="assignment_published",
+                entity_type="assignment",
+                entity_id=assignment.id,
+                metadata_json={},
+            )
+        )
         self._activate(db, assignment, students)
         return assignment
 
@@ -154,8 +188,12 @@ class AssignmentService:
         assignment_id: int,
         due_at: datetime,
         idempotency_key: str | None = None,
+        *,
+        coordinator: bool = False,
     ) -> Assignment:
-        assignment = require_teacher_assignment(db, actor, assignment_id)
+        assignment = require_staff_assignment(
+            db, actor, assignment_id, coordinator=coordinator, write=True
+        )
         if self._operation_seen(db, idempotency_key, "update_deadline", assignment.id):
             return assignment
         if assignment.status == "cancelled":
@@ -210,8 +248,12 @@ class AssignmentService:
         assignment_id: int,
         instructions: str,
         idempotency_key: str | None = None,
+        *,
+        coordinator: bool = False,
     ) -> Assignment:
-        assignment = require_teacher_assignment(db, actor, assignment_id)
+        assignment = require_staff_assignment(
+            db, actor, assignment_id, coordinator=coordinator, write=True
+        )
         if self._operation_seen(db, idempotency_key, "update_instructions", assignment.id):
             return assignment
         if assignment.status == "cancelled":
@@ -220,7 +262,13 @@ class AssignmentService:
         if not clean:
             raise ValidationError("Instructions cannot be empty")
         if idempotency_key:
-            db.add(IdempotencyKey(key=idempotency_key, operation="update_instructions", result_reference=str(assignment.id)))
+            db.add(
+                IdempotencyKey(
+                    key=idempotency_key,
+                    operation="update_instructions",
+                    result_reference=str(assignment.id),
+                )
+            )
         if assignment.instructions == clean:
             return assignment
         assignment.instructions = clean
@@ -247,8 +295,12 @@ class AssignmentService:
         actor: User,
         assignment_id: int,
         idempotency_key: str | None = None,
+        *,
+        coordinator: bool = False,
     ) -> Assignment:
-        assignment = require_teacher_assignment(db, actor, assignment_id)
+        assignment = require_staff_assignment(
+            db, actor, assignment_id, coordinator=coordinator, write=True
+        )
         if self._operation_seen(db, idempotency_key, "cancel_assignment", assignment.id):
             return assignment
         if assignment.status == "cancelled":
@@ -287,7 +339,6 @@ class AssignmentService:
         if self.notifications and was_assigned:
             self.notifications.notify_assignment_cancelled(db, assignment)
         return assignment
-
 
     @staticmethod
     def _operation_seen(db: Session, key: str | None, operation: str, assignment_id: int) -> bool:

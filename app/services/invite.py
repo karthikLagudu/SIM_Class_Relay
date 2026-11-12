@@ -18,11 +18,17 @@ class InviteService:
         if not invite or not invite.active:
             raise InviteError("Invite code is invalid or inactive")
         expires = invite.expires_at
-        if expires and expires.replace(tzinfo=expires.tzinfo or UTC) < now:
-            raise InviteError("Invite code has expired")
+        if expires and expires.replace(tzinfo=expires.tzinfo or UTC) <= now:
+            raise InviteError(
+                "Invite code has expired. Ask your teacher or coordinator for a new code."
+            )
         classroom = db.get(Classroom, invite.classroom_id)
         if not classroom or classroom.school_id != invite.school_id:
             raise InviteError("Invite context is invalid")
+        if classroom.archived_at:
+            raise InviteError(
+                "This class is archived. Ask your coordinator for an invitation to an active class."
+            )
         school_ids = set(
             db.scalars(
                 select(SchoolMembership.school_id).where(
