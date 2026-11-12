@@ -20,6 +20,7 @@ INLINE_IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/w
 def submission_file(
     request: Request,
     submission_id: int,
+    download: bool = False,
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
@@ -40,7 +41,7 @@ def submission_file(
         path,
         media_type=submission.mime_type if inline else "application/octet-stream",
         filename=submission.original_filename or path.name,
-        content_disposition_type="inline" if inline else "attachment",
+        content_disposition_type="inline" if inline and not download else "attachment",
         headers={
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",

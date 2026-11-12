@@ -76,7 +76,7 @@ class NotificationService:
         classroom = db.get(Classroom, assignment.classroom_id)
         instructions = assignment.instructions
         if len(instructions) > 1500:
-            instructions = instructions[:1500] + "… Open Classroom Companion for the full instructions."
+            instructions = instructions[:1500] + "… Open Class Relay for the full instructions."
         body = (
             "📚 New Homework Assigned\n\n"
             f"Assignment:\n{assignment.title}\n\n"

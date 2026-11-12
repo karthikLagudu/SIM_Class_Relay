@@ -1,6 +1,6 @@
 # Telegram integration setup and acceptance guide
 
-Classroom Companion owns every student identity. Telegram is only a private messaging channel linked to an existing `User` through a short-lived, one-time token. Names, emails, internal IDs, school IDs, passwords, and Telegram usernames are never placed in a connection URL.
+Class Relay owns every student identity. Telegram is only a private messaging channel linked to an existing `User` through a short-lived, one-time token. Names, emails, internal IDs, school IDs, passwords, and Telegram usernames are never placed in a connection URL.
 
 ## Before you start
 
@@ -15,7 +15,7 @@ Never paste the real bot token into source code, tests, screenshots, documentati
 3. Copy the bot username from BotFather or the bot profile. Configure only the username text; the application removes an accidental leading `@`.
 4. If a token is ever exposed in chat, a screenshot, source control, or logs, revoke/rotate it with BotFather and replace the value in `.env`.
 
-BotFather creates the Telegram bot identity. It does not create Classroom Companion students; teachers must create Rahul and Priya in the application database first.
+BotFather creates the Telegram bot identity. Teachers must create Rahul and Priya in Class Relay before linking their Telegram accounts.
 
 ## Exact local setup
 
@@ -215,7 +215,7 @@ Open the class roster and confirm **Connected**. A skipped delivery with `User h
 
 ### Telegram account is already linked
 
-One numeric Telegram account can belong to only one Classroom Companion user. Disconnect it from the currently linked student before reconnecting. Usernames and display names do not affect this rule.
+One numeric Telegram account can belong to only one Class Relay user. Disconnect it from the currently linked student before reconnecting. Usernames and display names do not affect this rule.
 
 If the student record is already linked to a different Telegram account, use **Disconnect Telegram** from the authorized class page, generate a new link, and open it with the intended account. The application never silently replaces a connection.
 

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="hero compact-hero workspace-hero">
+  <div><p class="eyebrow">School overview</p><h1>{{ school.name }}</h1><p>{{ classes|length }} {{ 'class' if classes|length == 1 else 'classes' }} · {{ teachers|length }} {{ 'teacher' if teachers|length == 1 else 'teachers' }} · {{ school.timezone }}</p></div>
+  <div class="actions"><a class="primary button-link" href="#create-class">Create a class</a><a class="ghost-button button-link" href="/teacher">Open classwork</a></div>
+</header>
+{% if schools|length > 1 %}
+<form class="scope-picker" action="/coordinator" method="get">
+  <label for="coordinator-school">School</label>
+  <select name="school_id" id="coordinator-school">{% for item in schools %}<option value="{{ item.id }}" {% if item.id == school.id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select>
+  <button class="ghost-button">Switch school</button>
+</form>
+{% endif %}
+<nav class="section-links" aria-label="School sections"><a href="#classes">Classes &amp; enrollment</a><a href="#teacher-roster">Teachers</a>{% if classes %}<a href="#add-teacher">Add a teacher</a>{% endif %}</nav>
+<section class="card" id="classes" aria-labelledby="school-classes">
+  <h2 id="school-classes">Classes &amp; enrollment</h2>
+  <div class="school-classes">
+    {% for classroom in classes %}
+    <article class="class-row" id="class-{{ classroom.id }}">
+      <div><h3><a href="/teacher/classes/{{ classroom.id }}">{{ classroom.name }}</a></h3><p>{{ classroom.grade }} · {{ counts.get(classroom.id,0) }} enrolled</p></div>
+      <div class="actions"><a class="ghost-button button-link" href="/teacher/classes/{{ classroom.id }}#students">Students &amp; Telegram</a><a class="ghost-button button-link" href="/teacher/classes/{{ classroom.id }}#invites">Invites</a></div>
+    </article>
+    {% else %}<p class="empty">No classes yet. Create a class, then add its teachers and students.</p>{% endfor %}
+  </div>
+</section>
+<div class="grid two-one">
+  <section class="card" id="create-class" aria-labelledby="class-create-title">
+    <h2 id="class-create-title">Create a class</h2>
+    <form method="post" action="/coordinator/classes#create-class" class="stack">
+      <input type="hidden" name="school_id" value="{{ school.id }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if errors.get("class") %}<div class="error" id="class-error" role="alert">{{ errors.class }}</div>{% endif %}
+      <label>Class name <input name="name" placeholder="Grade 8 Science" value="{{ form.get('name','') if errors.get('class') else '' }}" required {% if errors.get('class') %}aria-describedby="class-error"{% endif %}></label>
+      <label>Grade <input name="grade" placeholder="Grade 8" value="{{ form.get('grade','') }}" required {% if errors.get('class') %}aria-describedby="class-error"{% endif %}></label>
+      <div class="actions"><button class="primary">Create class</button></div>
+    </form>
+  </section>
+  <section class="card" id="teacher-roster" aria-labelledby="school-teachers">
+    <h2 id="school-teachers">Teachers</h2>
+    <div class="list">
+      {% for teacher in teachers %}
+      <div class="list-row"><div><strong>{{ teacher.name }}</strong><span>{{ teacher.email }}</span><span>{{ teacher_classes.get(teacher.id, [])|map(attribute="name")|join(", ") or "No classes assigned" }}</span></div></div>
+      {% else %}<p class="empty">No teacher accounts yet. Add a teacher after creating a class.</p>{% endfor %}
+    </div>
+    {% if classes %}<a class="ghost-button button-link" href="#add-teacher">Add a teacher</a>{% endif %}
+  </section>
+</div>
+<section class="card form-card" id="add-teacher" aria-labelledby="teacher-create-title">
+  <h2 id="teacher-create-title">Add a teacher</h2>
+  {% if not classes %}<p>Create a class first so you can give the teacher access to it.</p>
+  {% else %}
+  <form method="post" action="/coordinator/teachers#add-teacher" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="school_id" value="{{ school.id }}">
+    {% if errors.get("teacher") %}<div class="error" id="teacher-error" role="alert">{{ errors.teacher }} Re-enter the temporary password before saving.</div>{% endif %}
+    <div class="form-grid">
+      <label>Teacher name <input name="name" value="{{ form.get('name','') if errors.get('teacher') else '' }}" autocomplete="off" required {% if errors.get('teacher') %}aria-describedby="teacher-error"{% endif %}></label>
+      <label>Email <input type="email" name="email" value="{{ form.get('email','') }}" required {% if errors.get('teacher') %}aria-describedby="teacher-error"{% endif %}></label>
+    </div>
+    <label>Temporary password <input type="password" name="temporary_password" minlength="10" autocomplete="new-password" aria-describedby="teacher-password-hint{% if errors.get('teacher') %} teacher-error{% endif %}" required></label>
+    <p class="field-hint" id="teacher-password-hint">Use at least 10 characters and share the password privately.</p>
+    <fieldset class="student-picker" {% if errors.get('teacher') %}aria-describedby="teacher-error"{% endif %}>
+      <legend>Class access</legend>
+      {% for classroom in classes %}
+      <label class="check-row"><input type="checkbox" name="classroom_ids" value="{{ classroom.id }}" {% if classroom.id in form.get('classroom_ids',[]) %}checked{% endif %}><span>{{ classroom.name }}</span></label>
+      {% endfor %}
+    </fieldset>
+    <div class="actions"><button class="primary">Create teacher account</button></div>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

@@ -8,12 +8,15 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
 
 from app.auth.security import SessionManager
 from app.config import get_settings
@@ -26,8 +29,10 @@ from app.services.assignment import AssignmentService
 from app.services.notification import NotificationService
 from app.services.reminder import ReminderService
 from app.services.telegram_link import TelegramLinkService
+from app.status_labels import delivery_status, student_status
 from app.telegram.client import TelegramClient
 from app.telegram.service import TelegramService
+from app.web.helpers import local_input, render
 from app.web.router import router as web_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -61,7 +66,12 @@ def create_app() -> FastAPI:
     telegram_client = TelegramClient(settings)
     app.state.sessions = SessionManager(settings)
     app.state.templates = Jinja2Templates(directory="app/templates")
-    app.state.templates.env.filters["local_deadline"] = NotificationService.format_deadline
+    app.state.templates.env.filters.update(
+        local_deadline=NotificationService.format_deadline,
+        local_input=local_input,
+        student_status=student_status,
+        delivery_status=delivery_status,
+    )
     app.state.llm_service = LLMService(provider, settings.llm_confidence_threshold)
     app.state.telegram_client = telegram_client
     app.state.notification_service = NotificationService(telegram_client)
@@ -93,30 +103,46 @@ def create_app() -> FastAPI:
         )
         return response
 
+    def browser_error(request: Request, status_code: int, detail: str):
+        if "text/html" in request.headers.get("accept", "") and not request.url.path.startswith(
+            ("/api/", "/telegram/", "/static/")
+        ):
+            return render(request, "error.html", status_code=status_code, code=status_code, detail=detail)
+        return None
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException):
+        return browser_error(request, exc.status_code, str(exc.detail)) or await http_exception_handler(request, exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError):
+        page = browser_error(request, 422, "Check the fields you entered, then submit the form again.")
+        return page or await request_validation_exception_handler(request, exc)
+
     @app.exception_handler(AuthorizationError)
     async def authorization_error(_request: Request, _exc: AuthorizationError):
         logger.info("authorization_denied")
-        return JSONResponse(
+        return browser_error(_request, 403, "This class or work belongs to another account.") or JSONResponse(
             status_code=403, content={"detail": "Resource is outside your authorized scope"}
         )
 
     @app.exception_handler(NotFoundError)
     async def not_found_error(_request: Request, exc: NotFoundError):
-        return JSONResponse(status_code=404, content={"detail": str(exc)})
+        return browser_error(_request, 404, str(exc)) or JSONResponse(status_code=404, content={"detail": str(exc)})
 
     @app.exception_handler(DomainError)
     async def domain_error(_request: Request, exc: DomainError):
-        return JSONResponse(status_code=422, content={"detail": str(exc)})
+        return browser_error(_request, 422, str(exc)) or JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.exception_handler(IntegrityError)
     async def integrity_error(_request: Request, _exc: IntegrityError):
         logger.warning("database_integrity_error")
-        return JSONResponse(status_code=409, content={"detail": "The operation conflicts with a recent change. Reload and retry."})
+        return browser_error(_request, 409, "This changed while you were working. Reload the page and try again.") or JSONResponse(status_code=409, content={"detail": "The operation conflicts with a recent change. Reload and retry."})
 
     @app.exception_handler(OperationalError)
     async def database_unavailable(_request: Request, _exc: OperationalError):
         logger.warning("database_operation_failed")
-        return JSONResponse(status_code=503, content={"detail": "Database temporarily unavailable. Please retry."})
+        return browser_error(_request, 503, "The classroom is temporarily busy. Try again in a moment.") or JSONResponse(status_code=503, content={"detail": "Database temporarily unavailable. Please retry."})
 
     @app.get("/health")
     def health():

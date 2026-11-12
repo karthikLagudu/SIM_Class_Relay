@@ -1,29 +1,36 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
 from app.database import get_db
+from app.exceptions import InvalidStateTransition, ValidationError
 from app.models import (
     Assignment,
+    ClassMembership,
+    Classroom,
     Feedback,
+    NotificationDelivery,
     ProgressEvent,
     Reminder,
     StudentAssignmentState,
     Submission,
     User,
 )
+from app.reminders.policy import aware_utc
 from app.services.assignment import get_student_state
 from app.services.authorization import require_student_assignment, require_student_submission
 from app.services.progress import ProgressService
+from app.services.state_machine import TRANSITIONS
 from app.services.submission import SubmissionService
-from app.web.helpers import csrf, operation_key, render, web_user
+from app.web.helpers import csrf, operation_key, redirect_with_message, render, web_user
 
 router = APIRouter()
 
@@ -33,26 +40,47 @@ def student_dashboard(
     request: Request, user: User = Depends(web_user), db: Session = Depends(get_db)
 ):
     rows = db.execute(
-        select(Assignment, StudentAssignmentState)
+        select(Assignment, StudentAssignmentState, Classroom)
         .join(StudentAssignmentState, StudentAssignmentState.assignment_id == Assignment.id)
-        .where(StudentAssignmentState.student_id == user.id)
-        .order_by(Assignment.due_at)
+        .join(Classroom, Classroom.id == Assignment.classroom_id)
+        .join(ClassMembership, ClassMembership.classroom_id == Classroom.id)
+        .where(
+            StudentAssignmentState.student_id == user.id,
+            ClassMembership.user_id == user.id,
+            ClassMembership.role == "student",
+            Assignment.status != "draft",
+        )
+        .order_by(Assignment.due_at, Assignment.id)
     ).all()
+    actionable = [
+        row
+        for row in rows
+        if row[0].status != "cancelled"
+        and row[1].status not in {"submitted", "completed", "cancelled"}
+    ]
+    actionable.sort(key=lambda row: (row[1].status != "needs_revision", row[0].due_at))
+    assignment_by_id = {assignment.id: assignment for assignment, _, _ in rows}
     feedback = list(
         db.scalars(
             select(Feedback)
-            .where(Feedback.student_id == user.id)
-            .order_by(Feedback.created_at.desc())
-            .limit(10)
+            .where(
+                Feedback.student_id == user.id,
+                Feedback.assignment_id.in_(assignment_by_id),
+            )
+            .order_by(Feedback.id.desc())
+            .limit(6)
         )
     )
     return render(
         request,
         "student/dashboard.html",
         user=user,
-        rows=rows,
+        actionable=actionable,
+        history=[row for row in rows if row not in actionable],
         feedback=feedback,
+        assignments=assignment_by_id,
         csrf_token=csrf(request),
+        now=datetime.now(UTC),
         message=request.query_params.get("message"),
     )
 
@@ -64,6 +92,13 @@ def student_assignment(
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
+    return _render_assignment(request, user, db, assignment_id)
+
+
+def _render_assignment(
+    request, user, db, assignment_id, *, errors=None, form=None, status_code=200
+):
+    errors, form = errors or {}, form or {}
     assignment = require_student_assignment(db, user, assignment_id)
     state = get_student_state(db, assignment_id, user.id)
     progress = list(
@@ -90,13 +125,49 @@ def student_assignment(
             .order_by(Feedback.created_at.desc())
         )
     )
-    reminders = list(db.scalars(select(Reminder).where(
-        Reminder.assignment_id == assignment_id, Reminder.student_id == user.id,
-        Reminder.status.in_(["sent", "skipped", "failed"]),
-    ).order_by(Reminder.scheduled_for.desc())))
+    reminders = list(
+        db.scalars(
+            select(Reminder)
+            .where(
+                Reminder.assignment_id == assignment_id,
+                Reminder.student_id == user.id,
+                Reminder.status.in_(["sent", "skipped", "failed"]),
+            )
+            .order_by(Reminder.scheduled_for.desc())
+        )
+    )
+    reminder_deliveries = {
+        item.idempotency_key: item.status
+        for item in db.scalars(
+            select(NotificationDelivery).where(
+                NotificationDelivery.assignment_id == assignment_id,
+                NotificationDelivery.user_id == user.id,
+                NotificationDelivery.idempotency_key.in_(
+                    [f"reminder:{row.dedupe_key}" for row in reminders]
+                ),
+            )
+        )
+    }
+    actions = (
+        TRANSITIONS[state.status] | {state.status} if assignment.status == "assigned" else set()
+    )
+    can_submit = assignment.status == "assigned" and state.status not in {
+        "submitted",
+        "completed",
+        "cancelled",
+    }
     return render(
         request,
         "student/assignment.html",
+        status_code=status_code,
+        classroom=db.get(Classroom, assignment.classroom_id),
+        actions=actions,
+        can_submit=can_submit,
+        errors=errors,
+        form=form,
+        max_upload_mb=f"{request.app.state.settings.max_upload_bytes / (1024 * 1024):g}",
+        reminder_deliveries=reminder_deliveries,
+        past_due=aware_utc(assignment.due_at) < datetime.now(UTC),
         user=user,
         assignment=assignment,
         state=state,
@@ -105,7 +176,7 @@ def student_assignment(
         submissions=submissions,
         feedback=feedback,
         csrf_token=csrf(request),
-        idempotency_key=operation_key("submission"),
+        idempotency_key=form.get("idempotency_key") or operation_key("submission"),
         message=request.query_params.get("message"),
     )
 
@@ -117,14 +188,56 @@ def student_progress(
     status: str = Form(),
     message: str = Form(),
     csrf_token: str = Form(),
+    progress_percent: str = Form(default=""),
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    ProgressService().update(db, user, assignment_id, status, message)
-    db.commit()
-    return RedirectResponse(
-        f"/student/assignments/{assignment_id}?message=Progress+updated", status_code=303
+    require_student_assignment(db, user, assignment_id)
+    values = {
+        "progress_message": message,
+        "progress_percent": progress_percent,
+        "progress_status": status,
+    }
+    try:
+        if status == "blocked" and not message.strip():
+            raise ValidationError("Tell your teacher what you need help with.")
+        if len(message) > 2000:
+            raise ValidationError("Keep the update within 2,000 characters.")
+        percent = None
+        if progress_percent:
+            if (
+                not progress_percent.isascii()
+                or not progress_percent.isdigit()
+                or len(progress_percent) > 3
+                or int(progress_percent) > 100
+            ):
+                raise ValidationError("Enter a whole-number percentage between 0 and 100.")
+            percent = int(progress_percent)
+        if status == "in_progress" and not message.strip() and percent is None:
+            raise ValidationError("Enter an update or add a percentage.")
+        ProgressService().update(
+            db, user, assignment_id, status, message.strip() or "Progress updated", percent
+        )
+        db.commit()
+    except (ValidationError, InvalidStateTransition) as exc:
+        db.rollback()
+        return _render_assignment(
+            request,
+            user,
+            db,
+            assignment_id,
+            errors={"progress": str(exc)},
+            form=values,
+            status_code=422,
+        )
+    success = {
+        "acknowledged": "Assignment acknowledged. You can submit when you’re ready.",
+        "blocked": "Help requested. Your teacher can see your note on their dashboard.",
+        "in_progress": "Progress saved.",
+    }
+    return redirect_with_message(
+        f"/student/assignments/{assignment_id}", success[status], anchor="next-action"
     )
 
 
@@ -142,26 +255,40 @@ async def student_submit(
     validate_csrf(request, csrf_token)
     require_student_assignment(db, user, assignment_id)
     settings = request.app.state.settings
-    content = None
-    stored_path = None
-    original_name = None
-    mime_type = None
+    values = {"text_content": text_content, "idempotency_key": idempotency_key}
+
+    def retry(message, status_code=422):
+        return _render_assignment(
+            request,
+            user,
+            db,
+            assignment_id,
+            errors={"submission": message},
+            form=values,
+            status_code=status_code,
+        )
+
+    if len(text_content) > 10000:
+        return retry("Keep the written response within 10,000 characters.")
+    content = stored_path = original_name = mime_type = None
     if file and file.filename:
         content = await file.read(settings.max_upload_bytes + 1)
         if len(content) > settings.max_upload_bytes:
-            raise HTTPException(413, "File is too large")
-        original_name = Path(file.filename).name[:240]
-        safe_suffix = Path(original_name).suffix.lower()[:10]
+            return retry("That file is too large. Choose a smaller file and submit again.", 413)
+        if not content:
+            return retry("That file is empty. Choose a file with your work.")
+        original_name = file.filename.replace("\\", "/").rsplit("/", 1)[-1][:240]
         root = settings.upload_dir.resolve()
-        destination = (root / f"{uuid.uuid4().hex}{safe_suffix}").resolve()
-        if root not in destination.parents:
-            raise HTTPException(400, "Invalid filename")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
-        stored_path = str(destination)
-        mime_type = file.content_type
+        destination = root / uuid.uuid4().hex
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as output:
+                output.write(content)
+        except OSError:
+            return retry("The file could not be saved. Select it again and retry.", 503)
+        stored_path, mime_type = str(destination), file.content_type
     if not text_content.strip() and content is None:
-        raise HTTPException(422, "Provide text or a file")
+        return retry("Write a response or attach a file.")
     keep_file = False
     try:
         submission = SubmissionService().submit(
@@ -177,12 +304,18 @@ async def student_submit(
         )
         db.commit()
         keep_file = submission.stored_file_path == stored_path
+    except (ValidationError, InvalidStateTransition) as exc:
+        db.rollback()
+        return retry(
+            str(exc) + (" If you retry, select the file again." if file and file.filename else "")
+        )
     finally:
         if stored_path and not keep_file:
             Path(stored_path).unlink(missing_ok=True)
-    return RedirectResponse(
-        f"/student/assignments/{assignment_id}?message=Submission+{submission.id}+received",
-        status_code=303,
+    return redirect_with_message(
+        f"/student/assignments/{assignment_id}",
+        "Work submitted. Your teacher can review it now.",
+        anchor=f"submission-{submission.id}",
     )
 
 

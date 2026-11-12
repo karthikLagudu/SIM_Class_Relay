@@ -1,1 +1,1 @@
-"""Classroom Companion application package."""
+"""Class Relay application package."""

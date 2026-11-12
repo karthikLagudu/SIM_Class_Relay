@@ -23,7 +23,7 @@ class HiddenFields(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
         if tag == "form":
-            self.inside = attributes.get("action") == self.action
+            self.inside = attributes.get("action", "").partition("#")[0] == self.action
         if tag == "input" and self.inside and attributes.get("type") == "hidden":
             self.fields[attributes["name"]] = attributes["value"]
 
@@ -96,7 +96,7 @@ def run_demo(base_url: str) -> None:
         detail_url = f"/teacher/assignments/{assignment_id}"
         detail = teacher.get(detail_url).raise_for_status().text
         assert expected.strftime("%d %B %Y at %I:%M %p %Z") in detail
-        assert "Assignment Created" in detail and "logged" in detail and "skipped" in detail
+        assert all(label in detail for label in ("Assignment created", "Simulated", "Skipped"))
         print(
             "Verified relative deadline, student delivery records, and webhook replay protection."
         )
@@ -106,7 +106,7 @@ def run_demo(base_url: str) -> None:
             moved = send(900001, f"#{assignment_id}")
         assert moved["result"] == f"update_assignment_deadline:{assignment_id}", moved
         detail = teacher.get(detail_url).raise_for_status().text
-        assert "Deadline Updated" in detail and "cancelled" in detail
+        assert "Deadline updated" in detail and "Cancelled" in detail
         deadline_path = f"{detail_url}/deadline"
         due = (datetime.now(UTC) + timedelta(minutes=75)).astimezone(local_zone)
         form = HiddenFields(detail, deadline_path).fields
@@ -117,7 +117,7 @@ def run_demo(base_url: str) -> None:
         expected = due.strftime("%d %B %Y at %I:%M %p %Z")
         student_url = f"/student/assignments/{assignment_id}"
         assert expected in updated and expected in student.get(student_url).raise_for_status().text
-        assert "Deadline Updated" in updated and "cancelled" in updated
+        assert "Deadline updated" in updated and "Cancelled" in updated
         assert send(900101, "/cancel")["result"] == "context_cleared"
         for message, state in (
             ("Got it", "acknowledged"),
@@ -134,7 +134,7 @@ def run_demo(base_url: str) -> None:
         form = HiddenFields(dashboard, reminder_path).fields
         teacher.post(reminder_path, data=form, follow_redirects=True).raise_for_status()
         detail = teacher.get(detail_url).raise_for_status().text
-        assert "Blocked Support" in detail and "Silent Due Soon" in detail, (
+        assert "blocked support" in detail.lower() and "silent due soon" in detail.lower(), (
             "For a time-independent offline run, set QUIET_HOUR_START=0 and QUIET_HOUR_END=0."
         )
         print(
@@ -154,7 +154,7 @@ def run_demo(base_url: str) -> None:
             teacher.post(feedback_path, data=form, follow_redirects=True).raise_for_status().text
         )
         own_page = student.get(student_url).raise_for_status().text
-        assert "completed" in finished and "Good work. Your reasoning checks out." in own_page
+        assert "Marked complete" in finished and "Good work. Your reasoning checks out." in own_page
         assert (
             "Good work. Your reasoning checks out."
             not in silent.get(student_url).raise_for_status().text
@@ -166,7 +166,7 @@ def run_demo(base_url: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run the local Classroom Companion acceptance scenario."
+        description="Run the local Class Relay acceptance scenario."
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     args = parser.parse_args()

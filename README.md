@@ -1,8 +1,8 @@
-# Classroom Companion
+# Class Relay
 
-A Telegram-first assignment workflow with teacher, coordinator, and student web views. Teachers can create, publish, clarify, reschedule, or cancel work, monitor risk, and review submissions. Students can join an authorized class, track deadlines, ask for help, submit text or files, and receive feedback. FastAPI and Jinja serve the UI, SQLAlchemy persists data to SQLite, and an in-process worker handles reminder jobs and delivery retries.
+Class Relay by Super Intelli Machines is a Telegram-first assignment workflow with teacher, coordinator, and student web views. Teachers can create, publish, clarify, reschedule, or cancel work, monitor risk, and review submissions. Students can join an authorized class, track deadlines, ask for help, submit text or files, and receive feedback. FastAPI and Jinja serve the UI, SQLAlchemy persists data to SQLite, and an in-process worker handles reminder jobs and delivery retries.
 
-This checkout extends the existing Classroom Companion repository at `d7665d7`. It retains the existing implementation and history. [DEMO.md](DEMO.md) contains an executable local acceptance walkthrough and the real Telegram setup flow.
+This checkout extends the existing `classroom-companion` repository at `d7665d7`. It retains the existing implementation and history. [DEMO.md](DEMO.md) contains an executable local acceptance walkthrough and the real Telegram setup flow.
 
 ## Quick start
 

@@ -1,63 +1,119 @@
 {% extends "base.html" %}
-{% block title %}{{ assignment.title }}{% endblock %}
+{% from "components.html" import delivery_badge, field_error %}
 {% block content %}
-<a class="back" href="/student">Back to my assignments</a>
-<div class="hero assignment-hero">
-  <div>
-    <p class="eyebrow">ASSIGNMENT #{{ assignment.id }}</p>
-    <h1>{{ assignment.title }}</h1>
-    <p>{{ assignment.instructions }}</p>
-    <strong class="due-line">Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</strong>
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/student">My assignments</a></nav>
+<section class="card student-task" aria-labelledby="assignment-title">
+  <header class="task-heading">
+    <p class="eyebrow">{{ classroom.name }}</p><h1 id="assignment-title">{{ assignment.title }}</h1>
+    <div class="task-meta"><strong>Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</strong><span class="badge large {{ state.status }}">{{ state.status|student_status }}</span></div>
+  </header>
+  <div class="task-content">
+  <section aria-labelledby="student-instructions">
+    <h2 id="student-instructions">Instructions</h2>
+    <p class="preserve-lines">{{ assignment.instructions }}</p>
+    {% if past_due and can_submit %}<p class="notice">The deadline has passed. You can still turn in your work.</p>{% endif %}
+  </section>
+  <section class="next-step" id="next-action" aria-labelledby="next-title">
+    <h2 id="next-title">Next action</h2>
+    {% if state.status == 'needs_revision' %}
+    {% if feedback %}<p class="preserve-lines">{{ feedback[0].message|truncate(160) }}</p>{% endif %}
+    <div class="actions"><a class="primary button-link" href="#submit-work">Resubmit work</a>{% if feedback %}<a class="ghost-button button-link" href="#feedback">Read feedback</a>{% endif %}</div>
+    {% elif state.status == 'assigned' and 'acknowledged' in actions %}
+    <p>Let your teacher know you’ve seen the instructions.</p>
+    <form method="post" action="/student/assignments/{{ assignment.id }}/progress#next-action">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="status" value="acknowledged"><input type="hidden" name="message" value="Assignment acknowledged">
+      <div class="actions"><button class="primary">Acknowledge assignment</button><a class="ghost-button button-link" href="#submit-work">Go to submission</a></div>
+    </form>
+    {% elif state.status == 'submitted' %}
+    <p class="notice">Your work is submitted and waiting for your teacher’s review.</p>
+    <a class="ghost-button button-link" href="#submission-history">View submission receipt</a>
+    {% elif state.status == 'completed' %}
+    <p class="notice">Your teacher marked this assignment complete.</p>
+    {% if feedback %}<a class="ghost-button button-link" href="#feedback">Read feedback</a>{% endif %}
+    {% elif not can_submit %}
+    <p>This assignment is closed. You can still read its instructions and history.</p>
+    {% else %}
+    {% if state.status == 'blocked' %}<p class="notice">Help requested. Your teacher can see your note.</p><p class="preserve-lines">{{ state.block_reason }}</p>{% else %}<p>Submit your work when it’s ready, or share an update with your teacher.</p>{% endif %}
+    <a class="primary button-link" href="#submit-work">Go to submission</a>
+    {% endif %}
+    {% if errors.get('progress') and form.get('progress_status') not in actions %}
+    <p class="error" role="alert">{{ errors.progress }}</p>
+    <p class="preserve-lines">{{ form.get('progress_message','') }}</p>
+    {% endif %}
+    {% if 'in_progress' in actions and state.status != 'needs_revision' %}
+    <details class="disclosure-inline section-divider" {% if errors.get('progress') and form.get('progress_status') == 'in_progress' %}open{% endif %}>
+      <summary>Share progress</summary>
+      <form method="post" action="/student/assignments/{{ assignment.id }}/progress#next-action" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="status" value="in_progress">
+        <label>What have you done so far?<textarea name="message" rows="3" maxlength="2000" {% if errors.get('progress') and form.get('progress_status') == 'in_progress' %}aria-describedby="progress-error"{% endif %}>{{ form.get('progress_message','') if form.get('progress_status') == 'in_progress' else '' }}</textarea></label>
+        <label>Percent complete (optional)<input type="number" name="progress_percent" min="0" max="100" value="{{ form.get('progress_percent','') }}"></label>
+        {% if form.get('progress_status') == 'in_progress' %}{{ field_error(errors,'progress') }}{% endif %}
+        <div class="actions"><button class="ghost-button">Save progress</button></div>
+      </form>
+    </details>
+    {% endif %}
+    {% if 'blocked' in actions %}
+    <details class="disclosure-inline section-divider" {% if errors.get('progress') and form.get('progress_status') == 'blocked' %}open{% endif %}>
+      <summary>Request help</summary>
+      <form method="post" action="/student/assignments/{{ assignment.id }}/progress#next-action" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="status" value="blocked">
+        <label>What are you stuck on?<textarea name="message" rows="3" maxlength="2000" required {% if errors.get('progress') and form.get('progress_status') == 'blocked' %}aria-invalid="true" aria-describedby="progress-error"{% endif %}>{{ form.get('progress_message','') if form.get('progress_status') == 'blocked' else '' }}</textarea></label>
+        {% if form.get('progress_status') == 'blocked' %}{{ field_error(errors,'progress') }}{% endif %}
+        <div class="actions"><button class="ghost-button">Send help request</button></div>
+      </form>
+    </details>
+    {% endif %}
+  </section>
   </div>
-  <b class="badge large {{ state.status }}">{{ state.status|replace('_',' ') }}</b>
-</div>
-<div class="grid two-one">
-  <section class="card">
-    <p class="eyebrow">CHECK IN</p>
-    <h2>Share an update</h2>
-    <form class="stack" method="post" action="/student/assignments/{{ assignment.id }}/progress">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Status<select name="status"><option value="acknowledged">I’ve seen this</option><option value="in_progress">I’m working on it</option><option value="blocked">I’m blocked</option></select></label>
-      <label>Update<textarea name="message" rows="4" placeholder="What changed, or what help do you need?" required></textarea></label>
-      <button>Save update</button>
-    </form>
-  </section>
-  <section class="card">
-    <p class="eyebrow">SUBMIT</p>
-    <h2>Turn in your work</h2>
-    <form class="stack" method="post" enctype="multipart/form-data" action="/student/assignments/{{ assignment.id }}/submit">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
-      <label>Text response<textarea name="text_content" rows="4" placeholder="Paste your answer or notes here"></textarea></label>
-      <label>Or attach a file<input type="file" name="file"></label>
-      <button class="primary">Submit work</button>
-    </form>
-  </section>
-</div>
-<div class="grid two-one">
-  <section class="card">
-    <p class="eyebrow">HISTORY</p>
-    <h2>Submission history</h2>
-    <div class="list">{% for s in submissions %}<div class="list-row"><div><strong>{{ s.original_filename or s.text_content or 'Telegram file' }}</strong><span>{{ s.created_at.strftime('%d %b, %I:%M %p') }} · {{ s.submission_type }}</span>{% if s.stored_file_path %}<a href="/submissions/{{ s.id }}/file">View submitted file</a>{% endif %}</div></div>{% else %}<p class="empty">Nothing submitted yet.</p>{% endfor %}</div>
-  </section>
-  <section class="card">
-    <p class="eyebrow">FEEDBACK</p>
-    <h2>Teacher feedback</h2>
-    <div class="timeline">{% for f in feedback %}<div><i></i><p><strong>Teacher</strong><span>{{ f.message }}</span></p></div>{% else %}<p class="empty">No feedback yet.</p>{% endfor %}</div>
-  </section>
-</div>
-<section class="card">
-  <p class="eyebrow">ACTIVITY</p>
-  <h2>Your progress updates</h2>
-  <div class="timeline">{% for p in progress %}<div><i></i><p><strong>{{ p.event_type|replace('_',' ')|title }}</strong><span>{{ p.created_at.strftime('%d %b, %I:%M %p') }} · {{ p.message }}</span></p></div>{% else %}<p class="empty">Your check-ins will appear here.</p>{% endfor %}</div>
 </section>
-<section class="card">
-  <h2>Reminder history</h2>
+
+{% if feedback or state.status == 'needs_revision' %}
+<section class="card" id="feedback" aria-labelledby="student-feedback-title">
+  <h2 id="student-feedback-title">Teacher feedback</h2>
+  {% for item in feedback %}
+  <div class="review-feedback"><p class="tiny">{{ item.created_at|local_deadline(assignment.timezone) }}</p><p class="preserve-lines">{{ item.message }}</p></div>
+  {% endfor %}
+  {% if state.status == 'needs_revision' %}<a class="ghost-button button-link" href="#submit-work">Go to resubmission</a>{% endif %}
+</section>
+{% endif %}
+
+{% if can_submit or errors.get('submission') %}
+<section class="card form-card" id="submit-work" aria-labelledby="submit-title">
+  <h2 id="submit-title">{{ 'Resubmit your work' if state.status == 'needs_revision' else 'Submit your work' }}</h2>
+  {% if errors.get('submission') %}<div class="error" id="submission-error" role="alert">{{ errors.submission }}</div>{% endif %}
+  {% if can_submit %}
+  <form method="post" action="/student/assignments/{{ assignment.id }}/submit#submit-work" enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+    <p class="field-hint" id="submission-hint">Write a response or upload one file up to {{ max_upload_mb }} MB. If you attach a file, the file is submitted.</p>
+    <label>Written response<textarea name="text_content" rows="5" maxlength="10000" aria-describedby="submission-hint{% if errors.get('submission') %} submission-error{% endif %}">{{ form.get('text_content','') }}</textarea></label>
+    <label>Upload a file<input name="file" type="file" aria-describedby="submission-hint{% if errors.get('submission') %} submission-error{% endif %}"></label>
+    <div class="actions"><button class="primary">{{ 'Resubmit work' if state.status == 'needs_revision' else 'Submit work' }}</button></div>
+  </form>
+  {% elif form.get('text_content') %}<label>Unsaved response<textarea readonly>{{ form.text_content }}</textarea></label>{% endif %}
+</section>
+{% endif %}
+
+<section class="card" id="submission-history" aria-labelledby="history-title">
+  <h2 id="history-title">Submission history</h2>
   <div class="list">
-    {% for item in reminders %}
-    <div class="list-row"><div><strong>{{ item.reminder_type|replace('_', ' ')|title }}</strong>
-    <span>{{ item.scheduled_for|local_deadline(assignment.timezone) }}</span></div><b class="badge">{{ item.status }}</b></div>
-    {% else %}<p class="empty">No reminders yet.</p>{% endfor %}
+  {% for submission in submissions %}
+    <article class="list-row" id="submission-{{ submission.id }}">
+      <div><strong>{{ submission.original_filename or 'Written response' }}</strong><span>Receipt #{{ submission.id }} · {{ submission.created_at|local_deadline(assignment.timezone) }}</span>{% if submission.text_content %}<p class="preserve-lines">{{ submission.text_content }}</p>{% endif %}</div>
+      {% if submission.stored_file_path %}<a class="ghost-button button-link" href="/submissions/{{ submission.id }}/file?download=true">Download file</a>{% endif %}
+    </article>
+  {% else %}<p class="empty">No work submitted yet.</p>{% endfor %}
   </div>
 </section>
+
+<div class="grid two-one">
+  <details class="card disclosure">
+    <summary>Progress history</summary>
+    {% for item in progress %}<div class="list-row"><div><strong>{{ item.event_type|student_status }}</strong><span>{{ item.created_at|local_deadline(assignment.timezone) }}</span><p class="preserve-lines">{{ item.message }}</p></div>{% if item.progress_percent is not none %}<span class="badge">{{ item.progress_percent }}%</span>{% endif %}</div>{% else %}<p class="empty">No progress updates yet.</p>{% endfor %}
+  </details>
+  <details class="card disclosure">
+    <summary>Reminder history</summary>
+    {% if offline_demo %}<p class="mode-note">Offline demo. Simulated reminders are recorded here.</p>{% endif %}
+    {% for item in reminders %}<div class="list-row"><div><strong>{{ item.reminder_type|replace('_',' ')|capitalize }}</strong><span>{{ item.scheduled_for|local_deadline(assignment.timezone) }}</span></div>{{ delivery_badge(reminder_deliveries.get('reminder:' ~ item.dedupe_key,item.status)) }}</div>{% else %}<p class="empty">No reminders yet.</p>{% endfor %}
+  </details>
+</div>
 {% endblock %}

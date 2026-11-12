@@ -1,0 +1,20 @@
+{% macro field_error(errors, key) -%}
+  {% if errors.get(key) %}<span class="field-error" id="{{ key }}-error" role="alert">{{ errors[key] }}</span>{% endif %}
+{%- endmacro %}
+{% macro invalid(errors, key) -%}
+  {% if errors.get(key) %}aria-invalid="true" aria-describedby="{{ key }}-error"{% endif %}
+{%- endmacro %}
+{% macro assignment_badge(status) -%}
+  <span class="badge {{ status }}">{{ {"assigned": "Published", "draft": "Draft", "cancelled": "Cancelled"}[status] }}</span>
+{%- endmacro %}
+{% macro delivery_badge(status) -%}
+  <span class="badge {{ status }}">{{ status|delivery_status }}</span>
+{%- endmacro %}
+{% macro delivery_help(status, linked=true) -%}
+  {% if status == "pending" %}Waiting for the Telegram worker.
+  {% elif status == "logged" %}Offline demo. No Telegram message was sent.
+  {% elif status == "skipped" %}{{ "Recipient or assignment details changed." if linked else "This student has no linked Telegram account." }}
+  {% elif status == "failed" %}Telegram did not confirm delivery. Check again after the next retry.
+  {% elif status == "sent" %}Delivered to the linked Telegram chat.
+  {% endif %}
+{%- endmacro %}

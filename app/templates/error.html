@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow-card">
+  <h1>{% if code == 401 %}Sign in to continue{% elif code == 403 %}You can’t open this page{% elif code == 404 %}This page is unavailable{% else %}We couldn’t finish that action{% endif %}</h1>
+  <p>{{ detail }}</p>
+  <div class="actions">
+    {% if code == 401 %}<a class="primary button-link" href="/login">Sign in</a>
+    {% else %}<a class="primary button-link" href="/">Go to my workspace</a>{% if code == 403 %}<a class="ghost-button button-link" href="/login">Sign in with another account</a>{% endif %}{% endif %}
+  </div>
+</section>
+{% endblock %}

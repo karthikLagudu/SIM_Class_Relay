@@ -51,14 +51,16 @@ def test_coordinator_has_school_dashboard(client, app, db, data):
     assert "Create a class" in response.text
 
 
-def test_teacher_class_metric_opens_authorized_class_menu(client, app, data):
+def test_teacher_class_picker_only_shows_authorized_classes(client, app, data):
     authenticate(client, app, data["teacher1"].id)
 
     response = client.get("/teacher")
 
     assert response.status_code == 200
-    assert 'aria-controls="class-switcher-menu"' in response.text
-    assert 'aria-expanded="false"' in response.text
+    assert 'for="active-class"' in response.text
+    assert f'<option value="{data["class1"].id}" selected>' in response.text
+    assert f'<option value="{data["class2"].id}"' not in response.text
+    assert client.get(f"/teacher?class_id={data['class2'].id}").status_code == 403
     assert f'href="/teacher/classes/{data["class1"].id}"' in response.text
     assert data["class1"].name in response.text
     assert f'href="/teacher/classes/{data["class2"].id}"' not in response.text

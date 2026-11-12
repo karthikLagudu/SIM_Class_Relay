@@ -1,89 +1,176 @@
 {% extends "base.html" %}
-{% block title %}{{ assignment.title }}{% endblock %}
+{% from "components.html" import assignment_badge, delivery_badge, delivery_help, field_error, invalid %}
 {% block content %}
-<a class="back" href="/teacher">Back to dashboard</a>
-<div class="hero assignment-hero">
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/teacher?class_id={{ classroom.id }}">Classwork</a><span aria-hidden="true">/</span><a href="/teacher/classes/{{ classroom.id }}">{{ classroom.name }}</a></nav>
+<header class="hero assignment-hero workspace-hero">
   <div>
-    <p class="eyebrow">ASSIGNMENT #{{ assignment.id }}</p>
+    <p class="eyebrow">{{ classroom.name }}</p>
     <h1>{{ assignment.title }}</h1>
-    <p>{{ assignment.instructions }}</p>
     <strong class="due-line">Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</strong>
   </div>
-  <b class="badge large {{ assignment.status }}">{{ assignment.status }}</b>
-</div>
-{% if assignment.status == 'draft' %}
-<form class="card" method="post" action="/teacher/assignments/{{ assignment.id }}/publish">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <button class="primary">Publish assignment</button>
-</form>
-{% endif %}
-<div class="grid three">
-  <form class="card stack" method="post" action="/teacher/assignments/{{ assignment.id }}/deadline">
-    <p class="eyebrow">SCHEDULE</p>
-    <h2>Deadline</h2>
+  <div class="actions">{{ assignment_badge(assignment.status) }}{% if reviewable %}<a href="#review" class="primary button-link">Review {{ reviewable|length }} {{ 'submission' if reviewable|length == 1 else 'submissions' }}</a>{% elif assignment.status == "assigned" %}<a href="#edit-details" class="primary button-link">Edit assignment</a>{% endif %}</div>
+</header>
+
+<nav class="section-links" aria-label="Assignment sections">
+  <a href="#instructions">Instructions &amp; recipients</a>
+  {% if assignment.status != "draft" %}<a href="#review">Submissions</a><a href="#student-status">Student status</a><a href="#notifications">Notifications</a>{% endif %}
+  {% if assignment.status != "cancelled" %}<a href="#edit-details">Edit &amp; cancel</a>{% endif %}
+</nav>
+
+<section class="card" id="instructions" aria-labelledby="instructions-title">
+  <h2 id="instructions-title">Instructions &amp; recipients</h2>
+  <p class="preserve-lines">{{ assignment.instructions }}</p>
+  <dl class="details-grid">
+    <div><dt>Class</dt><dd>{{ classroom.name }}</dd></div>
+    <div><dt>Deadline</dt><dd>{{ assignment.due_at|local_deadline(assignment.timezone) }}</dd></div>
+    <div><dt>Recipients ({{ recipients|length }})</dt><dd>{{ recipients|map(attribute='name')|join(', ') or "No recipients" }}</dd></div>
+  </dl>
+  {% if assignment.status == "draft" %}
+  <form class="section-divider stack" method="post" action="/teacher/assignments/{{ assignment.id }}/publish#instructions">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="idempotency_key" value="{{ deadline_key }}">
-    <label>New deadline ({{ assignment.timezone }})<input type="datetime-local" name="due_at" required></label>
-    <button>Update deadline</button>
+    {% if errors.get('publish') %}<div class="error" role="alert">{{ errors.publish }} <a href="#edit-details">Edit draft details</a></div>{% endif %}
+    <p class="field-hint">Publishing makes the assignment visible to these students, queues Telegram notifications for linked accounts, and schedules reminders.</p>
+    <div class="actions"><button class="primary">Publish assignment</button><a class="ghost-button button-link" href="#edit-details">Edit draft details</a></div>
   </form>
-  <form class="card stack" method="post" action="/teacher/assignments/{{ assignment.id }}/instructions">
-    <p class="eyebrow">CLARITY</p>
-    <h2>Instructions</h2>
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="idempotency_key" value="{{ instructions_key }}">
-    <label>Student-facing instructions<textarea name="instructions" rows="4" required>{{ assignment.instructions }}</textarea></label>
-    <button>Save clarification</button>
-  </form>
-  <form class="card stack danger-card" method="post" action="/teacher/assignments/{{ assignment.id }}/cancel">
-    <p class="eyebrow">CLOSE</p>
-    <h2>Cancel assignment</h2>
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="idempotency_key" value="{{ cancel_key }}">
-    <p class="muted">Stops future reminders and closes active student states.</p>
-    <button class="danger-button">Cancel assignment</button>
-  </form>
-</div>
-<section class="card">
-  <p class="eyebrow">PROGRESS</p>
-  <h2>Student status</h2>
-  <div class="table">
-    <div class="tr th"><span>Student</span><span>Status</span><span>Last activity</span><span>Blocker</span></div>
-    {% for state, student in state_rows %}<div class="tr"><span><strong>{{ student.name }}</strong></span><span><b class="badge {{ state.status }}">{{ state.status|replace('_',' ') }}</b></span><span>{{ state.last_activity_at.strftime('%d %b, %I:%M %p') if state.last_activity_at else 'No response yet' }}</span><span>{{ state.block_reason or 'Clear' }}</span></div>{% else %}<p class="empty">No student states have been created.</p>{% endfor %}
-  </div>
+  {% elif assignment.status == "cancelled" %}
+  <p class="notice">This assignment is closed. Students cannot submit new work and future reminders have stopped.</p>
+  {% endif %}
 </section>
-<div class="grid two-one">
-  <section class="card">
-    <p class="eyebrow">AUTOMATION</p>
-    <h2>Reminder jobs</h2>
-    <div class="list">{% for r in reminders %}<div class="list-row"><div><strong>{{ r.reminder_type|replace('_',' ')|title }}</strong><span>Student #{{ r.student_id }} · {{ r.scheduled_for|local_deadline(assignment.timezone) }} · version {{ r.schedule_version }}</span></div><b class="badge {{ r.status }}">{{ r.status }}</b></div>{% else %}<p class="empty">No reminder jobs.</p>{% endfor %}</div>
-  </section>
-  <section class="card">
-    <p class="eyebrow">DELIVERY</p>
-    <h2>Student notifications</h2>
-    <div class="timeline">{% for d in deliveries %}<div><i></i><p><strong>{{ d.kind|replace('_',' ')|title }}</strong><span>{{ d.status }} · student #{{ d.user_id }} · {{ d.body[:90] }}{% if d.body|length > 90 %}…{% endif %}</span></p></div>{% else %}<p class="empty">No notifications yet.</p>{% endfor %}</div>
-  </section>
-</div>
-<section class="card">
-  <p class="eyebrow">REVIEW</p>
-  <h2>Submissions</h2>
-  {% for s in submissions %}<article class="submission">
-    <div>
-      <strong>{{ s.original_filename or s.text_content or ('Telegram file ' ~ s.telegram_file_id) }}</strong>
-      <span>Student #{{ s.student_id }} · {{ s.created_at.strftime('%d %b, %I:%M %p') }}</span>
-      {% if s.stored_file_path and s.mime_type in inline_image_types %}<a href="/submissions/{{ s.id }}/file"><img class="submission-preview" src="/submissions/{{ s.id }}/file" alt="Preview of {{ s.original_filename or 'student submission' }}"></a>{% elif s.stored_file_path %}<a class="file-link" href="/submissions/{{ s.id }}/file">View {{ s.original_filename or 'submitted file' }} · {{ s.mime_type or 'file' }}</a>{% endif %}
+
+{% if assignment.status != "draft" %}
+<section class="card" id="review" aria-labelledby="review-title">
+  <h2 id="review-title">Submissions</h2>
+  {% for submission in submissions %}
+  {% set needs_feedback = submission.id in reviewable %}
+  {% set failed_feedback = errors.get('feedback') and form.get('submission_id') == submission.id %}
+  <article class="submission review-card" id="submission-{{ submission.id }}">
+    <header class="section-head">
+      <div><h3>{{ student_names.get(submission.student_id, "Student") }}</h3><p class="muted">Submitted {{ submission.created_at|local_deadline(assignment.timezone) }}</p></div>
+      {% if needs_feedback %}<span class="badge needs_revision">Awaiting review</span>{% endif %}
+    </header>
+    {% if submission.text_content %}<p class="preserve-lines work-content">{{ submission.text_content }}</p>{% endif %}
+    {% if submission.stored_file_path %}
+      {% set file_url = '/submissions/' ~ submission.id ~ '/file' %}
+      <div class="submission-file">
+        <p><strong>{{ submission.original_filename or 'Submitted file' }}</strong></p>
+        {% if submission.mime_type in inline_image_types %}
+        <a href="{{ file_url }}" aria-label="Open image preview for {{ submission.original_filename or 'submitted work' }}"><img class="submission-preview" src="{{ file_url }}" alt="Submitted work from {{ student_names.get(submission.student_id, 'the student') }}" loading="lazy"></a>
+        {% endif %}
+        <div class="actions">
+          {% if submission.mime_type in inline_image_types %}<a class="ghost-button button-link" href="{{ file_url }}">Open image preview</a>{% endif %}
+          <a class="ghost-button button-link" href="{{ file_url }}?download=true">Download file</a>
+        </div>
+      </div>
+    {% elif not submission.text_content %}<p class="notice">This submission has no available file. Ask the student to attach it again if needed.</p>{% endif %}
+
+    {% for review in feedback if review.submission_id == submission.id %}
+    {% set outcome = feedback_outcomes.get(review.id) %}
+    {% set delivery = delivery_keys.get('feedback:' ~ (review.idempotency_key or review.id)) %}
+    <div class="review-feedback">
+      <div class="section-head"><h4>{{ 'Marked complete' if outcome is sameas true else 'Revision requested' if outcome is sameas false else 'Feedback saved' }}</h4><span class="tiny">{{ review.created_at|local_deadline(assignment.timezone) }}</span></div>
+      <p class="preserve-lines">{{ review.message }}</p>
+      <div class="delivery-line">
+        <strong>Telegram delivery</strong>
+        {% if delivery %}{{ delivery_badge(delivery.status) }}<span>{{ delivery_help(delivery.status, delivery.error != 'User has not linked Telegram') }}</span>
+        {% else %}<span>No delivery record.</span>{% endif %}
+      </div>
     </div>
-    {% for review in feedback if review.submission_id == s.id %}
-    <div class="list-row"><div><strong>Feedback</strong><p>{{ review.message }}</p></div></div>
     {% endfor %}
-    {% if s.id in reviewable %}
-    <form method="post" action="/teacher/submissions/{{ s.id }}/feedback" class="feedback-form">
+
+    {% if failed_feedback and not needs_feedback %}
+    <div class="error" role="alert">{{ errors.feedback }} Copy your unsaved note below and open the latest submission.</div>
+    <label>Unsaved feedback <textarea readonly>{{ form.feedback }}</textarea></label>
+    {% elif needs_feedback %}
+    <form method="post" action="/teacher/submissions/{{ submission.id }}/feedback#submission-{{ submission.id }}" class="stack section-divider">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="idempotency_key" value="{{ feedback_keys[s.id] }}">
-      <textarea name="message" placeholder="Specific, supportive feedback" required></textarea>
-      <select name="outcome"><option value="revision">Needs revision</option><option value="complete">Complete</option></select>
-      <button>Send feedback</button>
+      <input type="hidden" name="idempotency_key" value="{{ form.feedback_key if failed_feedback else feedback_keys[submission.id] }}">
+      <label for="feedback-{{ submission.id }}">Feedback for {{ student_names.get(submission.student_id, 'the student') }}
+        <textarea id="feedback-{{ submission.id }}" name="message" rows="3" maxlength="5000" required {% if failed_feedback %}aria-invalid="true" aria-describedby="feedback-error"{% endif %}>{{ form.feedback if failed_feedback else '' }}</textarea>
+        {% if failed_feedback %}{{ field_error(errors,'feedback') }}{% endif %}
+      </label>
+      <div class="actions"><button class="ghost-button" name="outcome" value="revision">Request revision</button><button class="primary" name="outcome" value="complete">Mark complete</button></div>
+      <p class="field-hint">Request revision to reopen submission. Mark complete when the student’s work is finished.</p>
     </form>
     {% endif %}
-  </article>{% else %}<p class="empty">No submissions yet.</p>{% endfor %}
+  </article>
+  {% else %}<p class="empty">No submissions yet. Student work will appear here when it’s turned in.</p>{% endfor %}
 </section>
+
+<section class="card" id="student-status" aria-labelledby="student-status-title">
+  <h2 id="student-status-title">Student status</h2>
+  <div class="list">
+  {% for state, student in state_rows %}
+    <article class="list-row" id="student-{{ student.id }}"><div><strong>{{ student.name }}</strong>
+      <span>{{ ('Updated ' ~ (state.last_activity_at|local_deadline(assignment.timezone))) if state.last_activity_at else 'No response yet' }}</span>
+      {% if state.block_reason and state.status in ('blocked','overdue') %}<p class="preserve-lines">{{ state.block_reason }}</p>{% endif %}
+    </div><b class="badge {{ state.status }}">{{ state.status|student_status }}</b></article>
+  {% else %}<p class="empty">No student status has been recorded for this assignment.</p>{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if assignment.status != "cancelled" %}
+<section class="card" id="edit-details" aria-labelledby="edit-title">
+  <h2 id="edit-title">Edit assignment details</h2>
+  <div class="form-grid">
+    <form class="stack edit-panel" method="post" action="/teacher/assignments/{{ assignment.id }}/deadline#edit-details">
+      <h3>Deadline</h3>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="idempotency_key" value="{{ form.get('deadline_key', deadline_key) }}">
+      <label>New deadline ({{ assignment.timezone }})
+        <input type="datetime-local" name="due_at" value="{{ form.get('due_at', assignment.due_at|local_input(assignment.timezone)) }}" required {{ invalid(errors,'due_at') }}>
+        {{ field_error(errors,'due_at') }}
+      </label>
+      <p class="field-hint">{{ 'Changing a published deadline replaces future reminders and queues a deadline update.' if assignment.status == 'assigned' else 'Reminders will be scheduled using this deadline when you publish.' }}</p>
+      <div class="actions"><button class="ghost-button">Update deadline</button></div>
+    </form>
+    <form class="stack edit-panel" method="post" action="/teacher/assignments/{{ assignment.id }}/instructions#edit-details">
+      <h3>Instructions</h3>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="idempotency_key" value="{{ form.get('instructions_key', instructions_key) }}">
+      <label>Student-facing instructions<textarea name="instructions" rows="4" maxlength="5000" required {{ invalid(errors,'instructions') }}>{{ form.get('instructions',assignment.instructions) }}</textarea>{{ field_error(errors,'instructions') }}</label>
+      <div class="actions"><button class="ghost-button">Save instructions</button></div>
+    </form>
+  </div>
+  <details class="disclosure-inline section-divider">
+    <summary>{{ 'Cancel draft' if assignment.status == 'draft' else 'Cancel assignment' }}</summary>
+    <form class="stack" method="post" action="/teacher/assignments/{{ assignment.id }}/cancel">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="idempotency_key" value="{{ cancel_key }}">
+      <p class="field-hint">{{ 'The draft will close without sending notifications.' if assignment.status == 'draft' else 'Students will no longer be able to submit. Future reminders stop, and linked students receive a cancellation notice.' }}</p>
+      <label class="check-row"><input type="checkbox" required><span>I confirm this assignment should be cancelled.</span></label>
+      <div class="actions"><button class="danger-button">Confirm cancellation</button></div>
+    </form>
+  </details>
+</section>
+{% endif %}
+
+{% if assignment.status != "draft" %}
+<div class="grid two-one" id="notifications">
+  <section class="card" aria-labelledby="delivery-title">
+    <h2 id="delivery-title">Telegram notifications</h2>
+    {% if offline_demo %}<p class="mode-note">Offline demo. Simulated deliveries do not send a Telegram message.</p>{% endif %}
+    <div class="list">
+    {% for item in deliveries %}
+      <div class="list-row">
+        <div><strong>{{ item.kind|replace('_',' ')|capitalize }}</strong><span>{{ student_names.get(item.user_id, 'Teacher') }} · {{ item.created_at|local_deadline(assignment.timezone) }}</span>
+          <span>{{ delivery_help(item.status, item.error != 'User has not linked Telegram') }}</span></div>{{ delivery_badge(item.status) }}
+      </div>
+    {% else %}<p class="empty">No Telegram notifications recorded for this assignment.</p>{% endfor %}
+    </div>
+  </section>
+  <section class="card" aria-labelledby="reminders-title">
+    <h2 id="reminders-title">Reminder schedule</h2>
+    <div class="list">
+    {% for item in reminders %}
+      {% set delivery = delivery_keys.get('reminder:' ~ item.dedupe_key) %}
+      <div class="list-row"><div><strong>{{ item.reminder_type|replace('_',' ')|capitalize }}</strong><span>{{ student_names.get(item.student_id, 'Student') }} · {{ item.scheduled_for|local_deadline(assignment.timezone) }}</span><span>Schedule {{ item.schedule_version }}</span></div>
+        {% if item.status == 'pending' and not item.processed_at %}<span class="badge">Scheduled</span>
+        {% else %}{{ delivery_badge(delivery.status if delivery and item.status != 'cancelled' else item.status) }}{% endif %}
+      </div>
+    {% else %}<p class="empty">No reminders scheduled.</p>{% endfor %}
+    </div>
+  </section>
+</div>
+{% endif %}
 {% endblock %}

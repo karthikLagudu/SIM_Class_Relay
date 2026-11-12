@@ -1,21 +1,38 @@
 {% extends "base.html" %}
-{% block title %}My assignments{% endblock %}
 {% block content %}
-<div class="hero dashboard-hero">
-  <div>
-    <p class="eyebrow">STUDENT WORKSPACE</p>
-    <h1>Your work, clearly organized.</h1>
-    <p>Check what is due, share progress early, and ask for help without losing the thread.</p>
-  </div>
+<header class="hero compact-hero workspace-hero">
+  <div><h1>My assignments</h1><p>{{ actionable|length }} {{ 'assignment needs' if actionable|length == 1 else 'assignments need' }} your attention.</p></div>
+</header>
+<div class="grid two-one priority-grid">
+  <section class="card" aria-labelledby="action-title">
+    <h2 id="action-title">Upcoming work and next steps</h2>
+    <div class="list">
+    {% for assignment, state, classroom in actionable %}
+      <a class="list-row" href="/student/assignments/{{ assignment.id }}">
+        <div><strong>{{ assignment.title }}</strong><span>{{ classroom.name }} · Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</span>
+          <span class="row-action">{{ 'Read feedback and resubmit' if state.status == 'needs_revision' else 'Read instructions and acknowledge' if state.status == 'assigned' else 'Open assignment' }}</span></div>
+        <span class="badge {{ state.status }}">{{ state.status|student_status }}</span>
+      </a>
+    {% else %}<p class="empty">No assignments need action right now. Check feedback or your submission history below.</p>{% endfor %}
+    </div>
+  </section>
+  <section class="card" aria-labelledby="feedback-title">
+    <h2 id="feedback-title">Latest feedback</h2>
+    <div class="list">
+      {% for item in feedback %}
+      <a class="list-row" href="/student/assignments/{{ item.assignment_id }}#feedback">
+        <div><strong>{{ assignments[item.assignment_id].title }}</strong><span>{{ item.message|truncate(100) }}</span></div>
+      </a>
+      {% else %}<p class="empty">Feedback from your teacher will appear here after they review your work.</p>{% endfor %}
+    </div>
+  </section>
 </div>
-<section class="card">
-  <p class="eyebrow">YOUR ASSIGNMENTS</p>
-  <h2>What’s next</h2>
-  <div class="assignment-cards">{% for a, state in rows %}<a href="/student/assignments/{{ a.id }}" class="assignment-card"><div><b class="badge {{ state.status }}">{{ state.status|replace('_',' ') }}</b><h3>{{ a.title }}</h3><p>{{ a.instructions[:140] }}{% if a.instructions|length > 140 %}…{% endif %}</p></div><span>Due {{ a.due_at|local_deadline(a.timezone) }}</span></a>{% else %}<p class="empty">No assignments yet.</p>{% endfor %}</div>
-</section>
-<section class="card">
-  <p class="eyebrow">FEEDBACK</p>
-  <h2>From your teacher</h2>
-  <div class="timeline">{% for f in feedback %}<div><i></i><p><strong>Assignment #{{ f.assignment_id }}</strong><span>{{ f.message }}</span></p></div>{% else %}<p class="empty">Feedback will appear here after a teacher reviews your work.</p>{% endfor %}</div>
+<section class="card" aria-labelledby="history-title">
+  <h2 id="history-title">Submitted and closed</h2>
+  <div class="list">
+  {% for assignment, state, classroom in history %}
+    <a class="list-row" href="/student/assignments/{{ assignment.id }}"><div><strong>{{ assignment.title }}</strong><span>{{ classroom.name }} · {{ 'Waiting for teacher review' if state.status == 'submitted' else 'View assignment history' }}</span></div><span class="badge {{ state.status }}">{{ state.status|student_status }}</span></a>
+  {% else %}<p class="empty">No submitted or closed assignments yet.</p>{% endfor %}
+  </div>
 </section>
 {% endblock %}

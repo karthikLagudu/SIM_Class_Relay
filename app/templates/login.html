@@ -1,30 +1,27 @@
 {% extends "base.html" %}
-{% block title %}Sign in · Classroom Companion{% endblock %}
 {% block content %}
-<section class="login-wrap">
-  <div class="login-copy">
-    <p class="eyebrow">WELCOME BACK</p>
-    <h1>Keep every learner moving forward.</h1>
-    <p>Assignments, blockers, submissions, and feedback in one calm operating view.</p>
-    <div class="login-preview" aria-label="Product highlights">
-      <span>Teacher triage</span>
-      <span>Student check-ins</span>
-      <span>Telegram delivery</span>
-    </div>
-  </div>
-  <form class="card login-card" method="post" action="/login">
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">DEMO ACCESS</p>
-        <h2>Sign in</h2>
-      </div>
-    </div>
-    <p class="muted">Use one of the seeded demo accounts.</p>
-    {% if error %}<div class="error">{{ error }}</div>{% endif %}
-    <label>Email<input type="email" name="email" autocomplete="username" placeholder="teacher@sim.school" required autofocus></label>
-    <label>Password<input type="password" name="password" autocomplete="current-password" placeholder="DemoPass123!" required></label>
-    <button class="primary wide">Continue</button>
-    <p class="tiny">Teacher demo: teacher@sim.school / DemoPass123!</p>
+<div class="login-wrap">
+  <header class="login-copy">
+    <h1>Class Relay <span>by Super Intelli Machines</span></h1>
+    <p>Sign in with your school account to open your workspace.</p>
+    {% if demo %}<a class="demo-link" href="#demo-accounts">See demo accounts</a>{% endif %}
+  </header>
+  <form class="card stack login-card" method="post" action="/login" aria-labelledby="sign-in-heading">
+    <h2 id="sign-in-heading">Sign in</h2>
+    {% if error %}<div id="login-error" class="error" role="alert">{{ error }}</div>{% endif %}
+    <label>Email<input type="email" name="email" value="{{ email|default('') }}" autocomplete="username" required {% if error %}aria-describedby="login-error"{% endif %}></label>
+    <label>Password<input type="password" name="password" autocomplete="current-password" required {% if error %}aria-describedby="login-error"{% endif %}></label>
+    <button class="primary">Sign in</button>
   </form>
-</section>
+  {% if demo %}
+  <section class="card demo-card" id="demo-accounts" aria-labelledby="demo-heading">
+    <div class="section-head"><h2 id="demo-heading">Demo accounts</h2><p class="mode-note">Telegram deliveries are simulated.</p></div>
+    <dl class="demo-accounts">
+      <div><dt>Teacher</dt><dd><code>teacher@demo.local</code><br><code>Teacher123!</code></dd></div>
+      <div><dt>Student</dt><dd><code>student1@demo.local</code><br><code>Student123!</code></dd></div>
+      <div><dt>Coordinator</dt><dd><code>coordinator@demo.local</code><br><code>Coordinator123!</code></dd></div>
+    </dl>
+  </section>
+  {% endif %}
+</div>
 {% endblock %}

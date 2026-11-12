@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.auth.security import validate_csrf
 from app.database import get_db
-from app.exceptions import LLMInterpretationError, ValidationError
+from app.exceptions import InvalidStateTransition, LLMInterpretationError, ValidationError
 from app.models import (
     ActivityEvent,
     Assignment,
+    AssignmentTarget,
     ClassMembership,
+    Classroom,
     Feedback,
     Invite,
     NotificationDelivery,
@@ -26,17 +28,26 @@ from app.models import (
     TelegramLinkToken,
     User,
 )
+from app.reminders.policy import aware_utc
 from app.services.authorization import (
     list_teacher_classes,
     require_teacher_assignment,
     require_teacher_class,
+    require_teacher_submission,
 )
 from app.services.classroom import ClassroomService
 from app.services.risk import RiskService
 from app.services.submission import FeedbackService
 from app.services.telegram_link import TelegramConnectionLink
 from app.web.files import INLINE_IMAGE_TYPES
-from app.web.helpers import csrf, operation_key, render, web_user
+from app.web.helpers import (
+    csrf,
+    operation_key,
+    parse_local_deadline,
+    redirect_with_message,
+    render,
+    web_user,
+)
 
 router = APIRouter()
 
@@ -50,6 +61,8 @@ def _render_class_page(
     connection_link: TelegramConnectionLink | None = None,
     link_student_id: int | None = None,
     message: str | None = None,
+    errors: dict[str, str] | None = None,
+    form: dict | None = None,
 ):
     classroom = require_teacher_class(db, user, class_id)
     students = list(
@@ -72,9 +85,7 @@ def _render_class_page(
     )
     invites = list(
         db.scalars(
-            select(Invite)
-            .where(Invite.classroom_id == class_id)
-            .order_by(Invite.created_at.desc())
+            select(Invite).where(Invite.classroom_id == class_id).order_by(Invite.created_at.desc())
         )
     )
     student_ids = [student.id for student in students]
@@ -93,7 +104,7 @@ def _render_class_page(
                 .order_by(TelegramLinkToken.created_at)
             )
         }
-    return render(
+    response = render(
         request,
         "teacher/class.html",
         user=user,
@@ -102,31 +113,30 @@ def _render_class_page(
         assignments=assignments,
         invites=invites,
         active_tokens=active_tokens,
+        school=db.get(School, classroom.school_id),
+        expired_invites={
+            item.id
+            for item in invites
+            if item.expires_at and aware_utc(item.expires_at) <= datetime.now(UTC)
+        },
+        can_link=bool(request.app.state.settings.telegram_bot_username),
+        status_code=422 if errors else 200,
+        errors=errors or {},
+        form=form or {},
         connection_link=connection_link,
         link_student_id=link_student_id,
         csrf_token=csrf(request),
         assignment_key=operation_key("assignment"),
         message=message,
     )
+    if connection_link:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
-@router.get("/teacher", response_class=HTMLResponse)
-def teacher_dashboard(
-    request: Request, user: User = Depends(web_user), db: Session = Depends(get_db)
-):
-    classes = list_teacher_classes(db, user)
-    if not classes:
-        raise HTTPException(403, "Teacher or coordinator access required")
-    class_ids = [item.id for item in classes]
-    coordinator_school_ids = list(
-        db.scalars(
-            select(SchoolMembership.school_id).where(
-                SchoolMembership.user_id == user.id,
-                SchoolMembership.role == "coordinator",
-            )
-        )
-    )
-    schools = list(
+def _teaching_schools(db: Session, user: User) -> list[School]:
+    return list(
         db.scalars(
             select(School)
             .join(SchoolMembership, SchoolMembership.school_id == School.id)
@@ -135,76 +145,102 @@ def teacher_dashboard(
                 SchoolMembership.role.in_(["teacher", "coordinator"]),
             )
             .distinct()
+            .order_by(School.name)
         )
     )
-    coordinator_school_id_set = set(coordinator_school_ids)
-    coordinator_schools = [
-        school for school in schools if school.id in coordinator_school_id_set
+
+
+@router.get("/teacher", response_class=HTMLResponse)
+def teacher_dashboard(
+    request: Request,
+    class_id: int | None = None,
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    return _render_dashboard(request, user, db, class_id=class_id)
+
+
+def _render_dashboard(
+    request: Request, user: User, db: Session, *, class_id=None, class_error=None, form=None
+):
+    classes = list_teacher_classes(db, user)
+    schools = _teaching_schools(db, user)
+    if not classes and not schools:
+        raise HTTPException(403, "Use a teacher or coordinator account to view classwork.")
+    active = (
+        require_teacher_class(db, user, class_id)
+        if class_id is not None
+        else next(iter(classes), None)
+    )
+    assignments, risks, reviews, deliveries = [], [], [], []
+    if active:
+        assignments = list(
+            db.scalars(
+                select(Assignment)
+                .where(Assignment.classroom_id == active.id)
+                .order_by(Assignment.due_at, Assignment.id)
+            )
+        )
+        risks = RiskService().for_actor(db, user, classroom_id=active.id)
+        latest = select(func.max(Submission.id)).group_by(
+            Submission.assignment_id, Submission.student_id
+        )
+        reviews = db.execute(
+            select(Submission, Assignment, User)
+            .join(Assignment, Assignment.id == Submission.assignment_id)
+            .join(User, User.id == Submission.student_id)
+            .join(
+                StudentAssignmentState,
+                and_(
+                    StudentAssignmentState.assignment_id == Submission.assignment_id,
+                    StudentAssignmentState.student_id == Submission.student_id,
+                ),
+            )
+            .where(
+                Assignment.classroom_id == active.id,
+                Assignment.status == "assigned",
+                StudentAssignmentState.status == "submitted",
+                Submission.id.in_(latest),
+            )
+            .order_by(Submission.created_at, Submission.id)
+        ).all()
+        deliveries = list(
+            db.scalars(
+                select(NotificationDelivery)
+                .join(Assignment, Assignment.id == NotificationDelivery.assignment_id)
+                .where(
+                    Assignment.classroom_id == active.id,
+                    NotificationDelivery.classroom_id == active.id,
+                    NotificationDelivery.school_id == active.school_id,
+                )
+                .order_by(NotificationDelivery.id.desc())
+                .limit(8)
+            )
+        )
+    now = datetime.now(UTC)
+    due_soon = [
+        item
+        for item in assignments
+        if item.status == "assigned" and now <= aware_utc(item.due_at) <= now + timedelta(days=1)
     ]
-    coordinator_classes = [
-        classroom for classroom in classes if classroom.school_id in coordinator_school_id_set
-    ]
-    assignments = list(
-        db.scalars(
-            select(Assignment)
-            .where(Assignment.classroom_id.in_(class_ids))
-            .order_by(Assignment.created_at.desc())
-        )
-    )
-    risks = RiskService().for_actor(db, user)
-    risk_summary = (
-        f"{len({item.student_id for item in risks})} students need attention across {len({item.assignment_id for item in risks})} assignments."
-        if risks else "No students currently need attention."
-    )
-    activity = list(
-        db.scalars(
-            select(ActivityEvent)
-            .where(ActivityEvent.classroom_id.in_(class_ids))
-            .order_by(ActivityEvent.created_at.desc())
-            .limit(12)
-        )
-    )
-    deliveries = list(
-        db.scalars(
-            select(NotificationDelivery)
-            .outerjoin(Assignment, Assignment.id == NotificationDelivery.assignment_id)
-            .where(or_(
-                and_(
-                    Assignment.classroom_id.in_(class_ids),
-                    NotificationDelivery.classroom_id == Assignment.classroom_id,
-                    NotificationDelivery.school_id == Assignment.school_id,
-                ),
-                and_(
-                    NotificationDelivery.assignment_id.is_(None),
-                    NotificationDelivery.classroom_id.in_(class_ids),
-                ),
-                and_(
-                    NotificationDelivery.assignment_id.is_(None),
-                    NotificationDelivery.classroom_id.is_(None),
-                    NotificationDelivery.school_id.in_(coordinator_school_ids),
-                ),
-            ))
-            .order_by(NotificationDelivery.created_at.desc())
-            .limit(10)
-        )
-    )
     return render(
         request,
         "teacher/dashboard.html",
+        status_code=422 if class_error else 200,
         user=user,
         classes=classes,
         schools=schools,
-        can_manage_teachers=bool(coordinator_schools),
-        coordinator_schools=coordinator_schools,
-        coordinator_classes=coordinator_classes,
+        active=active,
+        school=db.get(School, active.school_id) if active else None,
         assignments=assignments,
-        active_count=sum(item.status == "assigned" for item in assignments),
+        due_soon=due_soon,
         risks=risks,
-        risk_summary=risk_summary,
-        activity=activity,
+        reviews=reviews,
+        blocked_count=len({item.student_id for item in risks if "blocked" in item.reasons}),
         deliveries=deliveries,
         csrf_token=csrf(request),
-        idempotency_key=operation_key("assignment"),
+        class_error=class_error,
+        form=form or {},
         message=request.query_params.get("message"),
     )
 
@@ -234,9 +270,15 @@ def connect_teacher_telegram(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    link = request.app.state.telegram_link_service.create_teacher_link(db, user, class_id)
-    db.commit()
-    response = render(request, "teacher/connect_telegram.html", user=user, link=link, class_id=class_id)
+    try:
+        link = request.app.state.telegram_link_service.create_teacher_link(db, user, class_id)
+        db.commit()
+    except ValidationError as exc:
+        db.rollback()
+        return _render_class_page(request, user, db, class_id, errors={"telegram": str(exc)})
+    response = render(
+        request, "teacher/connect_telegram.html", user=user, link=link, class_id=class_id
+    )
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
@@ -253,10 +295,22 @@ def create_classroom(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    classroom = ClassroomService().create_classroom(db, user, school_id, name, grade)
-    db.commit()
-    return RedirectResponse(
-        f"/teacher/classes/{classroom.id}?message=Class+created", status_code=303
+    try:
+        classroom = ClassroomService().create_classroom(db, user, school_id, name, grade)
+        db.commit()
+    except ValidationError as exc:
+        db.rollback()
+        return _render_dashboard(
+            request,
+            user,
+            db,
+            class_error=str(exc),
+            form={"school_id": school_id, "name": name, "grade": grade},
+        )
+    return redirect_with_message(
+        f"/teacher/classes/{classroom.id}",
+        "Class created. Add students to get started.",
+        anchor="students",
     )
 
 
@@ -266,16 +320,31 @@ def add_student(
     class_id: int,
     name: str = Form(),
     email: str = Form(),
-    temporary_password: str = Form(),
     csrf_token: str = Form(),
+    temporary_password: str = Form(default=""),
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    ClassroomService().add_student(db, user, class_id, name, email, temporary_password)
-    db.commit()
-    return RedirectResponse(
-        f"/teacher/classes/{class_id}?message=Student+added", status_code=303
+    try:
+        student = ClassroomService().add_student(
+            db, user, class_id, name, email, temporary_password
+        )
+        db.commit()
+    except ValidationError as exc:
+        db.rollback()
+        return _render_class_page(
+            request,
+            user,
+            db,
+            class_id,
+            errors={"student": str(exc)},
+            form={"name": name, "email": email},
+        )
+    return redirect_with_message(
+        f"/teacher/classes/{class_id}",
+        f"{student.name} is enrolled. You can generate their Telegram link below.",
+        anchor=f"student-{student.id}",
     )
 
 
@@ -289,10 +358,12 @@ def create_telegram_link(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    link = request.app.state.telegram_link_service.create_link(
-        db, user, class_id, student_id
-    )
-    db.commit()
+    try:
+        link = request.app.state.telegram_link_service.create_link(db, user, class_id, student_id)
+        db.commit()
+    except ValidationError as exc:
+        db.rollback()
+        return _render_class_page(request, user, db, class_id, errors={"telegram": str(exc)})
     return _render_class_page(
         request,
         user,
@@ -332,10 +403,23 @@ def create_invite(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    ClassroomService().create_invite(db, user, class_id, expires_in_days, max_uses)
-    db.commit()
-    return RedirectResponse(
-        f"/teacher/classes/{class_id}?message=Invite+created", status_code=303
+    try:
+        invite = ClassroomService().create_invite(db, user, class_id, expires_in_days, max_uses)
+        db.commit()
+    except ValidationError as exc:
+        db.rollback()
+        return _render_class_page(
+            request,
+            user,
+            db,
+            class_id,
+            errors={"invite": str(exc)},
+            form={"expires_in_days": expires_in_days, "max_uses": max_uses},
+        )
+    return redirect_with_message(
+        f"/teacher/classes/{class_id}",
+        f"Invite {invite.code} created. Share it with enrolled students.",
+        anchor="invites",
     )
 
 
@@ -350,8 +434,57 @@ def disable_invite(
     validate_csrf(request, csrf_token)
     invite = ClassroomService().disable_invite(db, user, invite_id)
     db.commit()
-    return RedirectResponse(
-        f"/teacher/classes/{invite.classroom_id}?message=Invite+disabled", status_code=303
+    return redirect_with_message(
+        f"/teacher/classes/{invite.classroom_id}",
+        "Invite disabled. Existing class members keep their access.",
+        anchor="invites",
+    )
+
+
+def _render_assignment_form(
+    request, db, user, classroom, school, *, entry="natural", form=None, errors=None
+):
+    students = list(
+        db.scalars(
+            select(User)
+            .join(ClassMembership, ClassMembership.user_id == User.id)
+            .where(ClassMembership.classroom_id == classroom.id, ClassMembership.role == "student")
+            .order_by(User.name)
+        )
+    )
+    return render(
+        request,
+        "teacher/new_assignment.html",
+        status_code=422 if errors else 200,
+        user=user,
+        classroom=classroom,
+        school=school,
+        students=students,
+        entry=entry,
+        form=form or {},
+        errors=errors or {},
+        csrf_token=csrf(request),
+        idempotency_key=(form or {}).get("idempotency_key") or operation_key("assignment"),
+        selected_ids=(form or {}).get("student_ids", [student.id for student in students]),
+    )
+
+
+@router.get("/teacher/classes/{class_id}/assignments/new", response_class=HTMLResponse)
+def new_assignment(
+    request: Request,
+    class_id: int,
+    entry: str = "natural",
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    classroom = require_teacher_class(db, user, class_id)
+    return _render_assignment_form(
+        request,
+        db,
+        user,
+        classroom,
+        db.get(School, classroom.school_id),
+        entry="manual" if entry == "manual" else "natural",
     )
 
 
@@ -359,9 +492,13 @@ def disable_invite(
 def create_assignment(
     request: Request,
     classroom_id: int = Form(),
-    natural_text: str = Form(),
     idempotency_key: str = Form(),
     csrf_token: str = Form(),
+    natural_text: str = Form(default=""),
+    title: str = Form(default=""),
+    instructions: str = Form(default=""),
+    due_at: str = Form(default=""),
+    entry: str = Form(default="natural"),
     student_ids: list[int] = Form(default=[]),
     targeting_mode: str = Form(default="all"),
     draft: bool = Form(default=False),
@@ -371,29 +508,91 @@ def create_assignment(
     validate_csrf(request, csrf_token)
     classroom = require_teacher_class(db, user, classroom_id)
     school = db.get(School, classroom.school_id)
-    try:
-        parsed = request.app.state.llm_service.assignment(
-            db, user.id, natural_text, school.timezone, datetime.now(UTC)
+    values = {
+        "natural_text": natural_text,
+        "title": title,
+        "instructions": instructions,
+        "due_at": due_at,
+        "student_ids": student_ids,
+        "idempotency_key": idempotency_key,
+    }
+    errors = {}
+    if targeting_mode == "selected" and not student_ids:
+        errors["recipients"] = "Choose at least one student."
+    if entry == "manual":
+        if not title.strip() or len(title) > 240:
+            errors["title"] = "Enter a title of up to 240 characters."
+        if not instructions.strip() or len(instructions) > 5000:
+            errors["instructions"] = "Enter instructions of up to 5,000 characters."
+        try:
+            deadline = parse_local_deadline(due_at, school.timezone)
+            if deadline <= datetime.now(UTC):
+                errors["due_at"] = "Choose a future deadline."
+        except ValidationError as exc:
+            errors["due_at"] = str(exc)
+    elif not natural_text.strip() or len(natural_text) > 5000:
+        errors["natural_text"] = (
+            "Describe the work and include a deadline, in up to 5,000 characters."
         )
+    if errors:
+        return _render_assignment_form(
+            request, db, user, classroom, school, entry=entry, form=values, errors=errors
+        )
+    try:
+        if entry != "manual":
+            try:
+                parsed = request.app.state.llm_service.assignment(
+                    db, user.id, natural_text, school.timezone, datetime.now(UTC)
+                )
+            except LLMInterpretationError as exc:
+                db.commit()
+                return _render_assignment_form(
+                    request,
+                    db,
+                    user,
+                    classroom,
+                    school,
+                    entry=entry,
+                    form=values,
+                    errors={"natural_text": str(exc)},
+                )
+            title, instructions, deadline = parsed.title, parsed.instructions, parsed.due_at
         assignment = request.app.state.assignment_service.create(
             db,
             user,
             classroom_id,
-            parsed.title,
-            parsed.instructions,
-            parsed.due_at,
+            title,
+            instructions,
+            deadline,
             school.timezone,
             idempotency_key,
             student_ids if targeting_mode == "selected" else None,
             draft=draft,
         )
         db.commit()
-        return RedirectResponse(
-            f"/teacher/assignments/{assignment.id}?message=Assignment+created", status_code=303
+    except (ValidationError, IntegrityError, OperationalError) as exc:
+        db.rollback()
+        error = (
+            str(exc)
+            if isinstance(exc, ValidationError)
+            else "The assignment could not be saved. Your entries are still here. Try saving again."
         )
-    except LLMInterpretationError as exc:
-        db.commit()
-        return RedirectResponse(f"/teacher?message={str(exc).replace(' ', '+')}", status_code=303)
+        return _render_assignment_form(
+            request,
+            db,
+            user,
+            classroom,
+            school,
+            entry=entry,
+            form=values,
+            errors={"general": error},
+        )
+    message = (
+        "Draft saved. Review the recipients, instructions, and deadline before publishing."
+        if assignment.status == "draft"
+        else "Assignment published. Check Notifications for delivery updates."
+    )
+    return redirect_with_message(f"/teacher/assignments/{assignment.id}", message)
 
 
 @router.post("/teacher/assignments/{assignment_id}/publish")
@@ -405,9 +604,21 @@ def publish_assignment(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    request.app.state.assignment_service.publish(db, user, assignment_id)
-    db.commit()
-    return RedirectResponse(f"/teacher/assignments/{assignment_id}?message=Published", status_code=303)
+    try:
+        request.app.state.assignment_service.publish(db, user, assignment_id)
+        db.commit()
+    except (ValidationError, IntegrityError, OperationalError) as exc:
+        db.rollback()
+        error = (
+            str(exc)
+            if isinstance(exc, ValidationError)
+            else "Publishing could not be confirmed. Check the draft status and try again."
+        )
+        return _render_assignment(request, user, db, assignment_id, errors={"publish": error})
+    return redirect_with_message(
+        f"/teacher/assignments/{assignment_id}",
+        "Assignment published. Students can open it now. Check Notifications for Telegram delivery.",
+    )
 
 
 @router.get("/teacher/assignments/{assignment_id}", response_class=HTMLResponse)
@@ -417,7 +628,21 @@ def teacher_assignment(
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
+    return _render_assignment(request, user, db, assignment_id)
+
+
+def _render_assignment(request, user, db, assignment_id, *, errors=None, form=None):
+    errors, form = errors or {}, form or {}
     assignment = require_teacher_assignment(db, user, assignment_id)
+    classroom = db.get(Classroom, assignment.classroom_id)
+    recipients = list(
+        db.scalars(
+            select(User)
+            .join(AssignmentTarget, AssignmentTarget.student_id == User.id)
+            .where(AssignmentTarget.assignment_id == assignment_id)
+            .order_by(User.name)
+        )
+    )
     rows = db.execute(
         select(StudentAssignmentState, User)
         .join(User, User.id == StudentAssignmentState.student_id)
@@ -427,7 +652,7 @@ def teacher_assignment(
         db.scalars(
             select(Submission)
             .where(Submission.assignment_id == assignment_id)
-            .order_by(Submission.created_at.desc())
+            .order_by(Submission.id.desc())
         )
     )
     feedback = list(
@@ -455,15 +680,40 @@ def teacher_assignment(
             .order_by(NotificationDelivery.created_at.desc())
         )
     )
+    delivery_keys = {item.idempotency_key: item for item in deliveries if item.idempotency_key}
+    feedback_outcomes = {
+        event.entity_id: event.metadata_json.get("complete")
+        for event in db.scalars(
+            select(ActivityEvent).where(
+                ActivityEvent.entity_type == "feedback",
+                ActivityEvent.event_type == "feedback_sent",
+                ActivityEvent.classroom_id == assignment.classroom_id,
+                ActivityEvent.entity_id.in_([review.id for review in feedback]),
+            )
+        )
+    }
     latest = {}
     for submission in submissions:
         latest.setdefault(submission.student_id, submission.id)
-    reviewable = {latest[state.student_id] for state, _ in rows if state.status == "submitted" and state.student_id in latest}
+    reviewable = {
+        latest[state.student_id]
+        for state, _ in rows
+        if state.status == "submitted" and state.student_id in latest
+    }
     return render(
         request,
         "teacher/assignment.html",
+        status_code=422 if errors else 200,
         user=user,
         assignment=assignment,
+        classroom=classroom,
+        recipients=recipients,
+        student_names={student.id: student.name for student in recipients},
+        student_states={state.student_id: state for state, _ in rows},
+        delivery_keys=delivery_keys,
+        feedback_outcomes=feedback_outcomes,
+        errors=errors,
+        form=form,
         state_rows=rows,
         submissions=submissions,
         feedback=feedback,
@@ -493,20 +743,34 @@ def update_deadline(
     validate_csrf(request, csrf_token)
     assignment = require_teacher_assignment(db, user, assignment_id)
     try:
-        wall_time = datetime.fromisoformat(due_at)
-    except ValueError as exc:
-        raise ValidationError("Enter a valid local date and time") from exc
-    zone = ZoneInfo(assignment.timezone)
-    local = wall_time.replace(tzinfo=zone)
-    if wall_time.tzinfo is not None or local.utcoffset() != local.replace(fold=1).utcoffset():
-        raise ValidationError("Choose an unambiguous time in the school's timezone")
-    request.app.state.assignment_service.update_deadline(
-        db, user, assignment_id, local.astimezone(UTC), idempotency_key
-    )
-    db.commit()
-    return RedirectResponse(
-        f"/teacher/assignments/{assignment_id}?message=Deadline+updated", status_code=303
-    )
+        deadline = parse_local_deadline(due_at, assignment.timezone)
+        changed = deadline != aware_utc(assignment.due_at)
+        request.app.state.assignment_service.update_deadline(
+            db, user, assignment_id, deadline, idempotency_key
+        )
+        db.commit()
+    except (ValidationError, IntegrityError, OperationalError) as exc:
+        db.rollback()
+        error = (
+            str(exc)
+            if isinstance(exc, ValidationError)
+            else "The deadline could not be saved. Try updating it again."
+        )
+        return _render_assignment(
+            request,
+            user,
+            db,
+            assignment_id,
+            errors={"due_at": error},
+            form={"due_at": due_at, "deadline_key": idempotency_key},
+        )
+    if not changed:
+        message = "The deadline is already set to that time. The reminder schedule is unchanged."
+    elif assignment.status == "draft":
+        message = "Draft deadline updated. Reminders will be scheduled when you publish."
+    else:
+        message = "Deadline updated. The old reminder schedule was replaced. Check Notifications for delivery updates."
+    return redirect_with_message(f"/teacher/assignments/{assignment_id}", message)
 
 
 @router.post("/teacher/assignments/{assignment_id}/instructions")
@@ -520,13 +784,29 @@ def update_instructions(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    request.app.state.assignment_service.clarify(
-        db, user, assignment_id, instructions, idempotency_key
-    )
-    db.commit()
-    return RedirectResponse(
-        f"/teacher/assignments/{assignment_id}?message=Instructions+updated", status_code=303
-    )
+    try:
+        if len(instructions) > 5000:
+            raise ValidationError("Keep instructions within 5,000 characters.")
+        request.app.state.assignment_service.clarify(
+            db, user, assignment_id, instructions, idempotency_key
+        )
+        db.commit()
+    except (ValidationError, IntegrityError, OperationalError) as exc:
+        db.rollback()
+        error = (
+            str(exc)
+            if isinstance(exc, ValidationError)
+            else "The instructions could not be saved. Try updating them again."
+        )
+        return _render_assignment(
+            request,
+            user,
+            db,
+            assignment_id,
+            errors={"instructions": error},
+            form={"instructions": instructions, "instructions_key": idempotency_key},
+        )
+    return redirect_with_message(f"/teacher/assignments/{assignment_id}", "Instructions updated.")
 
 
 @router.post("/teacher/assignments/{assignment_id}/cancel")
@@ -539,11 +819,16 @@ def cancel_assignment(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
+    assignment = require_teacher_assignment(db, user, assignment_id)
+    was_draft = assignment.status == "draft"
     request.app.state.assignment_service.cancel(db, user, assignment_id, idempotency_key)
     db.commit()
-    return RedirectResponse(
-        f"/teacher/assignments/{assignment_id}?message=Assignment+cancelled", status_code=303
+    message = (
+        "Draft cancelled. It was never shared with students."
+        if was_draft
+        else "Assignment cancelled. Future reminders have stopped. Check Notifications for delivery updates."
     )
+    return redirect_with_message(f"/teacher/assignments/{assignment_id}", message)
 
 
 @router.post("/teacher/submissions/{submission_id}/feedback")
@@ -558,17 +843,56 @@ def create_feedback(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    feedback = FeedbackService(request.app.state.notification_service).create(
-        db,
-        user,
-        submission_id,
-        message,
-        complete=outcome == "complete",
-        idempotency_key=idempotency_key,
+    submission = require_teacher_submission(db, user, submission_id)
+    assignment_id = submission.assignment_id
+    try:
+        if outcome not in {"revision", "complete"}:
+            raise ValidationError("Choose Request revision or Mark complete.")
+        if not message.strip() or len(message) > 5000:
+            raise ValidationError("Enter feedback of up to 5,000 characters.")
+        feedback = FeedbackService(request.app.state.notification_service).create(
+            db,
+            user,
+            submission_id,
+            message,
+            complete=outcome == "complete",
+            idempotency_key=idempotency_key,
+        )
+        event = db.scalar(
+            select(ActivityEvent).where(
+                ActivityEvent.entity_type == "feedback",
+                ActivityEvent.entity_id == feedback.id,
+                ActivityEvent.event_type == "feedback_sent",
+            )
+        )
+        db.commit()
+    except (ValidationError, InvalidStateTransition, IntegrityError, OperationalError) as exc:
+        db.rollback()
+        error = (
+            "The feedback could not be saved. Your note is below. Try again after checking the latest submission."
+            if isinstance(exc, (IntegrityError, OperationalError))
+            else str(exc)
+        )
+        return _render_assignment(
+            request,
+            user,
+            db,
+            assignment_id,
+            errors={"feedback": error},
+            form={
+                "submission_id": submission_id,
+                "feedback": message,
+                "feedback_key": idempotency_key,
+            },
+        )
+    complete = event.metadata_json.get("complete") if event else None
+    saved = {True: "Marked complete.", False: "Revision requested."}.get(
+        complete, "Feedback saved."
     )
-    db.commit()
-    return RedirectResponse(
-        f"/teacher/assignments/{feedback.assignment_id}?message=Feedback+saved", status_code=303
+    return redirect_with_message(
+        f"/teacher/assignments/{assignment_id}",
+        f"{saved} The note is visible to the student. Check Telegram delivery below.",
+        anchor=f"submission-{submission_id}",
     )
 
 
@@ -576,6 +900,7 @@ def create_feedback(
 def run_reminders(
     request: Request,
     csrf_token: str = Form(),
+    class_id: int | None = Form(default=None),
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
@@ -583,16 +908,22 @@ def run_reminders(
     classroom_ids = {item.id for item in list_teacher_classes(db, user)}
     if not classroom_ids:
         raise HTTPException(403, "Teacher access required")
+    if class_id is not None:
+        require_teacher_class(db, user, class_id)
+        classroom_ids = {class_id}
     reminders = request.app.state.reminder_service.run(db, classroom_ids=classroom_ids)
     db.commit()
-    return RedirectResponse(
-        f"/teacher?message=Processed+{len(reminders)}+reminders", status_code=303
+    message = (
+        f"Processed {len(reminders)} reminder jobs. Check Telegram delivery below."
+        if reminders
+        else "No reminder jobs are due right now."
+    )
+    return redirect_with_message(
+        f"/teacher?class_id={class_id}" if class_id else "/teacher", message
     )
 
 
 @router.get("/api/teacher/classes/{class_id}")
-def api_teacher_class(
-    class_id: int, user: User = Depends(web_user), db: Session = Depends(get_db)
-):
+def api_teacher_class(class_id: int, user: User = Depends(web_user), db: Session = Depends(get_db)):
     item = require_teacher_class(db, user, class_id)
     return {"id": item.id, "name": item.name, "school_id": item.school_id}

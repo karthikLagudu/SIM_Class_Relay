@@ -4,7 +4,7 @@ import logging
 import shlex
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import literal, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,7 @@ from app.exceptions import DomainError, InviteError, TelegramLinkError
 from app.llm.service import LLMService
 from app.models import (
     Assignment,
+    NotificationDelivery,
     ProcessedTelegramUpdate,
     Reminder,
     School,
@@ -29,13 +30,14 @@ from app.services.notification import NotificationService
 from app.services.progress import ProgressService
 from app.services.submission import SubmissionService
 from app.services.telegram_link import TelegramLinkService
+from app.status_labels import reminder_status, student_status
 from app.telegram.client import TelegramClient
 from app.telegram.files import TelegramAttachment
 from app.telegram.router import TelegramIntentRouter
 
 logger = logging.getLogger(__name__)
 HELP = (
-    "Connect with the secure link provided by Classroom Companion or your teacher.\n"
+    "Connect with the secure link provided by Class Relay or your teacher.\n"
     "/join CODE [EMAIL] - join a class from a linked student account\n\nCommands:\n"
     "/assign CLASS_ID instructions and deadline - teacher creates work\n"
     "/ack ASSIGNMENT_ID\n/progress ASSIGNMENT_ID 50 (or a written update)\n/blocked ASSIGNMENT_ID reason\n"
@@ -142,7 +144,7 @@ class TelegramService:
                         db,
                         user,
                         chat_id,
-                        f"Classroom Companion is connected as {user.name}.\n\n{HELP}",
+                        f"Class Relay is connected as {user.name}.\n\n{HELP}",
                         kind="help",
                     )
                     return "start_linked"
@@ -150,9 +152,9 @@ class TelegramService:
                     db,
                     None,
                     chat_id,
-                    "Welcome to Classroom Companion.\n\n"
+                    "Welcome to Class Relay.\n\n"
                     "To receive school notifications, use the secure Telegram connection "
-                    "link provided through Classroom Companion or your teacher.",
+                    "link provided through Class Relay or your teacher.",
                     kind="help",
                 )
                 return "start_unlinked"
@@ -286,7 +288,7 @@ class TelegramService:
                 db,
                 user,
                 chat_id,
-                f"Updated assignment #{assignment_id}: {status.replace('_', ' ')}.",
+                f"Updated assignment #{assignment_id}: {student_status(status)}.",
                 kind="progress",
             )
             return f"progress:{assignment_id}:{status}"
@@ -317,14 +319,20 @@ class TelegramService:
                 return "classes"
             if command == "/reminders":
                 rows = db.execute(
-                    select(Assignment.title, Reminder.status, Reminder.scheduled_for, Assignment.timezone)
+                    select(Assignment, Reminder, NotificationDelivery.status)
+                    .select_from(Reminder)
                     .join(Assignment, Assignment.id == Reminder.assignment_id)
+                    .outerjoin(
+                        NotificationDelivery,
+                        NotificationDelivery.idempotency_key == literal("reminder:") + Reminder.dedupe_key,
+                    )
                     .where(Assignment.classroom_id.in_([item.id for item in classes]))
                     .order_by(Reminder.scheduled_for.desc()).limit(12)
                 )
                 body = "\n".join(
-                    f"{title}: {status} · {self.notifications.format_deadline(due, tz)}"
-                    for title, status, due, tz in rows
+                    f"{assignment.title}: {reminder_status(reminder.status, bool(reminder.processed_at), delivery)}"
+                    f" · {self.notifications.format_deadline(reminder.scheduled_for, assignment.timezone)}"
+                    for assignment, reminder, delivery in rows
                 )
                 self.client.send(db, user, chat_id, body or "No teaching reminders.", kind="reminders")
                 return "reminders"
@@ -337,7 +345,7 @@ class TelegramService:
                 .where(StudentAssignmentState.student_id == user.id)
             ).all()
             summary = (
-                "\n".join(f"#{a.id} {a.title}: {s.status}, due {self.notifications.format_deadline(a.due_at, a.timezone)}" for a, s in rows)
+                "\n".join(f"#{a.id} {a.title}: {student_status(s.status)}, due {self.notifications.format_deadline(a.due_at, a.timezone)}" for a, s in rows)
                 or "No assignments."
             )
             self.client.send(db, user, chat_id, summary, kind="status")

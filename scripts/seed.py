@@ -96,7 +96,7 @@ def main() -> None:
         )
         state.status = "in_progress"
         state.last_activity_at = datetime.now(UTC)
-    print("Seeded Classroom Companion demo data.")
+    print("Seeded Class Relay demo data.")
     print("Teacher: teacher@demo.local / Teacher123!")
     print("Students: student1@demo.local and student2@demo.local / Student123!")
     print("Coordinator: coordinator@demo.local / Coordinator123!")

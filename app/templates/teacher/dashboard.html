@@ -1,184 +1,113 @@
 {% extends "base.html" %}
-{% block title %}Teacher dashboard{% endblock %}
+{% from "components.html" import assignment_badge, delivery_badge %}
 {% block content %}
-<div class="hero dashboard-hero">
-  <div>
-    <p class="eyebrow">TEACHER WORKSPACE</p>
-    <h1>Good to see you, {{ user.name.split(' ')[0] }}.</h1>
-    <p>Focus on the students who need you most, then keep the whole class moving.</p>
+<header class="hero compact-hero workspace-hero class-heading">
+  <div class="class-context">
+    <p class="eyebrow">{{ school.name if school else "Teacher workspace" }}</p>
+    <h1>{{ active.name if active else "Your classes" }}</h1>
+    {% if active %}
+    <form class="scope-picker" method="get" action="/teacher">
+      <label for="active-class">Active class</label>
+      <select id="active-class" name="class_id">
+        {% for c in classes %}<option value="{{ c.id }}" {% if c.id == active.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+      </select>
+      <button class="ghost-button">Switch class</button>
+    </form>
+    {% endif %}
   </div>
-  <form method="post" action="/teacher/reminders/run">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button class="primary">Run reminders</button>
-  </form>
-</div>
-<div class="metrics">
-  <div class="metric-switcher" data-class-switcher>
-    <button
-      type="button"
-      class="metric metric-button"
-      aria-expanded="false"
-      aria-controls="class-switcher-menu"
-    >
-      <small>Classes</small>
-      <span>{{ classes|length }}</span>
-      <p>Choose a class <b class="metric-chevron" aria-hidden="true">⌄</b></p>
-    </button>
-    <div id="class-switcher-menu" class="class-switcher-menu" hidden>
-      <div class="class-switcher-heading">
-        <small>Your classes</small>
-        <span>Select one to open its workspace</span>
-      </div>
-      <nav aria-label="Available classes">
-        {% for c in classes %}
-        <a href="/teacher/classes/{{ c.id }}" class="class-switcher-option">
-          <span><strong>{{ c.name }}</strong><small>{{ c.grade }}</small></span>
-          <b aria-hidden="true">→</b>
-        </a>
-        {% else %}
-        <p class="empty">No classes are available.</p>
-        {% endfor %}
-      </nav>
+  {% if active %}
+  <div class="actions">
+    <a class="primary button-link" href="/teacher/classes/{{ active.id }}/assignments/new">New assignment</a>
+    <a class="ghost-button button-link" href="/teacher/classes/{{ active.id }}">Manage class</a>
+  </div>
+  {% endif %}
+</header>
+{% if active %}
+<nav class="metrics workflow-metrics" aria-label="Class priorities">
+  <a href="#reviews" class="metric"><strong>{{ reviews|length }}</strong><span>Awaiting review</span></a>
+  <a href="#attention" class="metric {% if blocked_count %}danger{% endif %}"><strong>{{ blocked_count }}</strong><span>Need help</span></a>
+  <a href="#due-soon" class="metric"><strong>{{ due_soon|length }}</strong><span>Due in 24 hours</span></a>
+</nav>
+
+<div class="grid class-priorities">
+  <section class="card" id="reviews" aria-labelledby="reviews-title">
+    <h2 id="reviews-title">Review submissions</h2>
+    <div class="list">
+      {% for submission, assignment, student in reviews %}
+      <a href="/teacher/assignments/{{ assignment.id }}#submission-{{ submission.id }}" class="list-row">
+        <div><strong>{{ student.name }}</strong><span>{{ assignment.title }}</span></div><span class="row-action">Review</span>
+      </a>
+      {% else %}<p class="empty">No submissions awaiting review. New work appears here as students submit it.</p>{% endfor %}
     </div>
-  </div>
-  <div class="metric danger"><small>Attention</small><span>{{ risks|length }}</span><p>Students to review</p></div>
-  <div class="metric"><small>Active assignments</small><span>{{ active_count }}</span><p>Published work</p></div>
+  </section>
+  <section class="card" id="attention" aria-labelledby="attention-title">
+    <h2 id="attention-title">Needs attention</h2>
+    <div class="list">
+      {% for item in risks %}
+      <a href="/teacher/assignments/{{ item.assignment_id }}#student-{{ item.student_id }}" class="list-row">
+        <div><strong>{{ item.student_name }}</strong><span>{{ item.assignment_title }}</span>
+          <span>{{ item.reasons|join(' · ')|capitalize }}</span></div>
+        <b class="badge {{ 'blocked' if item.risk_level in ('high', 'critical') else 'needs_revision' }}">{{ item.risk_level|capitalize }}</b>
+      </a>
+      {% else %}<p class="empty">No students need attention in this class right now.</p>{% endfor %}
+    </div>
+  </section>
+  <section class="card" id="due-soon" aria-labelledby="due-title">
+    <h2 id="due-title">Due in the next 24 hours</h2>
+    <div class="list">
+      {% for item in due_soon %}
+      <a href="/teacher/assignments/{{ item.id }}" class="list-row"><div><strong>{{ item.title }}</strong><span>{{ item.due_at|local_deadline(item.timezone) }}</span></div></a>
+      {% else %}<p class="empty">No published assignments are due in the next 24 hours.</p>{% endfor %}
+    </div>
+  </section>
 </div>
+
+  <section class="card" id="assignments" aria-labelledby="assignments-title">
+    <h2 id="assignments-title">Assignments</h2>
+    <div class="list">
+      {% for item in assignments %}
+      <a href="/teacher/assignments/{{ item.id }}" class="list-row">
+        <div><strong>{{ item.title }}</strong><span>Due {{ item.due_at|local_deadline(item.timezone) }}</span></div>{{ assignment_badge(item.status) }}
+      </a>
+      {% else %}<p class="empty">This class has no assignments yet. <a href="/teacher/classes/{{ active.id }}/assignments/new">Create your first draft</a>.</p>{% endfor %}
+    </div>
+  </section>
+
+<details class="card disclosure" id="notifications">
+  <summary>Telegram delivery</summary>
+  {% if offline_demo %}<p class="mode-note">Offline demo. Telegram messages are simulated.</p>{% endif %}
+  <div class="list">
+  {% for item in deliveries %}
+    <a class="list-row" href="/teacher/assignments/{{ item.assignment_id }}#notifications">
+      <div><strong>{{ item.kind|replace('_',' ')|capitalize }}</strong><span>{{ item.body|truncate(100) }}</span></div>{{ delivery_badge(item.status) }}
+    </a>
+  {% else %}<p class="empty">No class notifications yet. Publish an assignment to start the delivery history.</p>{% endfor %}
+  </div>
+  <form action="/teacher/reminders/run#notifications" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="class_id" value="{{ active.id }}">
+    <button class="ghost-button">Run reminders for {{ active.name }}</button>
+  </form>
+</details>
+{% else %}
 <section class="card">
-  <p class="eyebrow">ONBOARDING</p>
-  <h2>Create a class</h2>
-  <form method="post" action="/teacher/classes" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>School<select name="school_id">{% for school in schools %}<option value="{{ school.id }}">{{ school.name }}</option>{% endfor %}</select></label>
-    <label>Class name<input name="name" placeholder="Grade 8 Science" required></label>
-    <label>Grade<input name="grade" placeholder="Grade 8" required></label>
-    <button>Create class</button>
-  </form>
-</section>
-{% if can_manage_teachers %}
-<section class="card coordinator-teacher-card">
-  <div class="section-head">
-    <div>
-      <p class="eyebrow">TEAM ACCESS</p>
-      <h2>Add a teacher</h2>
-      <p class="muted">Create a secure login and choose exactly which classes this teacher can access.</p>
-    </div>
-  </div>
-  <form method="post" action="/coordinator/teachers" class="stack teacher-profile-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="teacher-profile-fields">
-      <label>Teacher name<input name="name" placeholder="Anita Sharma" autocomplete="name" required></label>
-      <label>Email<input type="email" name="email" placeholder="anita@school.example" autocomplete="email" required></label>
-      <label>Temporary password<input type="password" name="temporary_password" minlength="10" autocomplete="new-password" required></label>
-      <label>School
-        <select name="school_id" data-teacher-school required>
-          {% for school in coordinator_schools %}<option value="{{ school.id }}">{{ school.name }}</option>{% endfor %}
-        </select>
-      </label>
-    </div>
-    <fieldset class="student-picker teacher-class-picker">
-      <legend>Class access</legend>
-      <p class="tiny">Select one or more classes. The teacher will only see the selected workspaces.</p>
-      {% for c in coordinator_classes %}
-      <label class="check-row" data-teacher-class-school="{{ c.school_id }}">
-        <input type="checkbox" name="classroom_ids" value="{{ c.id }}">
-        <span><strong>{{ c.name }}</strong><small>{{ c.grade }}</small></span>
-      </label>
-      {% else %}
-      <p class="empty">Create a class before adding a teacher.</p>
-      {% endfor %}
-    </fieldset>
-    <div class="teacher-profile-submit">
-      <p class="tiny">Share the temporary password privately. The teacher can sign in immediately after creation.</p>
-      <button class="primary">Create teacher profile</button>
-    </div>
-  </form>
+  <h2>No classes yet</h2>
+  <p>Create a class to start enrolling students and assigning work.</p>
 </section>
 {% endif %}
-<div class="grid two-one">
-  <section class="card create-card">
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">CREATE</p>
-        <h2>Assign with natural language</h2>
-      </div>
+<details id="create-class" class="card disclosure" {% if not active or class_error %}open{% endif %}>
+  <summary>Create a class</summary>
+  {% if class_error %}<div class="error" id="create-class-error" role="alert">{{ class_error }}</div>{% endif %}
+  {% if schools %}
+  <form method="post" action="/teacher/classes#create-class" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-grid">
+      <label>School <select name="school_id">{% for item in schools %}<option value="{{ item.id }}" {% if item.id == form.get('school_id', school.id if school else none) %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></label>
+      <label>Class name <input name="name" value="{{ form.get('name','') }}" required {% if class_error %}aria-describedby="create-class-error"{% endif %}></label>
+      <label>Grade <input name="grade" value="{{ form.get('grade','') }}" required {% if class_error %}aria-describedby="create-class-error"{% endif %}></label>
     </div>
-    <form method="post" action="/teacher/assignments" class="stack">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
-      <label>Class
-        <select name="classroom_id">{% for c in classes %}<option value="{{ c.id }}">{{ c.name }} · {{ c.grade }}</option>{% endfor %}</select>
-      </label>
-      <label>What should students do?
-        <textarea name="natural_text" rows="5" placeholder="Complete the climate worksheet and upload a photo by Friday at 6 PM" required></textarea>
-      </label>
-      <button class="primary">Interpret & assign</button>
-      <button name="draft" value="true">Save as draft</button>
-    </form>
-  </section>
-  <section class="card">
-    <p class="eyebrow">ATTENTION</p>
-    <h2>Student risks</h2>
-    <p class="muted">{{ risk_summary }}</p>
-    <div class="list">{% for item in risks %}<a href="/teacher/assignments/{{ item.assignment_id }}" class="list-row"><div><strong>{{ item.student_name }}</strong><span>{{ item.assignment_title }} · {{ item.reasons|join(', ') }}</span></div><b class="badge {{ 'overdue' if item.risk_level == 'critical' else 'blocked' }}">{{ item.risk_level|capitalize }} · {{ item.risk_score }}</b></a>{% else %}<p class="empty">No active risks. The room is quiet right now.</p>{% endfor %}</div>
-  </section>
-</div>
-<div class="grid two-one">
-  <section class="card">
-    <p class="eyebrow">OVERVIEW</p>
-    <h2>Assignments</h2>
-    <div class="list">{% for a in assignments %}<a href="/teacher/assignments/{{ a.id }}" class="list-row"><div><strong>{{ a.title }}</strong><span>Due {{ a.due_at|local_deadline(a.timezone) }} · Class {{ a.classroom_id }}</span></div><b class="badge {{ a.status }}">{{ a.status }}</b></a>{% else %}<p class="empty">Create your first assignment above.</p>{% endfor %}</div>
-  </section>
-  <section class="card">
-    <p class="eyebrow">DELIVERY LOG</p>
-    <h2>Recent messages</h2>
-    <div class="timeline">{% for d in deliveries %}<div><i></i><p><strong>{{ d.kind|replace('_',' ')|title }}</strong><span>{{ d.status }} · {{ d.body[:85] }}{% if d.body|length > 85 %}…{% endif %}</span></p></div>{% else %}<p class="empty">No messages yet.</p>{% endfor %}</div>
-  </section>
-</div>
-<script>
-  (() => {
-    const switcher = document.querySelector("[data-class-switcher]");
-    if (!switcher) return;
-
-    const trigger = switcher.querySelector("button");
-    const menu = switcher.querySelector("#class-switcher-menu");
-    const closeMenu = (restoreFocus = false) => {
-      menu.hidden = true;
-      trigger.setAttribute("aria-expanded", "false");
-      if (restoreFocus) trigger.focus();
-    };
-
-    trigger.addEventListener("click", () => {
-      const willOpen = menu.hidden;
-      menu.hidden = !willOpen;
-      trigger.setAttribute("aria-expanded", String(willOpen));
-      if (willOpen) menu.querySelector("a")?.focus();
-    });
-
-    document.addEventListener("click", (event) => {
-      if (!switcher.contains(event.target)) closeMenu();
-    });
-
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !menu.hidden) closeMenu(true);
-    });
-  })();
-
-  (() => {
-    const school = document.querySelector("[data-teacher-school]");
-    if (!school) return;
-
-    const classRows = document.querySelectorAll("[data-teacher-class-school]");
-    const syncClasses = () => {
-      classRows.forEach((row) => {
-        const visible = row.dataset.teacherClassSchool === school.value;
-        row.hidden = !visible;
-        row.querySelector("input").disabled = !visible;
-        if (!visible) row.querySelector("input").checked = false;
-      });
-    };
-    school.addEventListener("change", syncClasses);
-    syncClasses();
-  })();
-</script>
+    <div class="actions"><button class="ghost-button">Create class</button></div>
+  </form>
+  {% else %}<p>Ask a coordinator to add you to a school before creating a class.</p>{% endif %}
+</details>
 {% endblock %}

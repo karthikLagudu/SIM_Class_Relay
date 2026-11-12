@@ -37,8 +37,15 @@ def home(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    return render(request, "login.html", error=None)
+def login_page(request: Request, db: Session = Depends(get_db)):
+    return render(request, "login.html", demo=demo_accounts_available(request, db))
+
+
+def demo_accounts_available(request: Request, db: Session) -> bool:
+    settings = request.app.state.settings
+    if settings.environment != "development" or settings.telegram_mode != "log":
+        return False
+    return db.scalar(select(User.id).where(User.email == "teacher@demo.local")) is not None
 
 
 @router.post("/login")
@@ -50,7 +57,10 @@ def login(
 ):
     user = db.scalar(select(User).where(User.email == email.strip().lower()))
     if not user or not verify_password(password, user.password_hash):
-        return render(request, "login.html", error="Invalid email or password")
+        return render(
+            request, "login.html", status_code=401, error="Check your email and password and try again.",
+            email=email, demo=demo_accounts_available(request, db),
+        )
     token, _ = request.app.state.sessions.create(user.id)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
