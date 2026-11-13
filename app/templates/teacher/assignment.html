@@ -24,6 +24,28 @@
 
 <section class="card" id="instructions" aria-labelledby="instructions-title">
   <h2 id="instructions-title">Instructions &amp; recipients</h2>
+  {% if errors.get('draft') %}<p class="error" role="alert">{{ errors.draft }}</p>{% endif %}
+  {% if editing_draft %}
+  <form class="stack" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/draft#instructions" data-guard-unsaved {% if errors %}data-unsaved{% endif %}>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="field-hint">Draft for <strong>{{ classroom.name }}</strong>. To use a different class, open its assignment form and create a new draft.</p>
+    <div class="editor-layout">
+      <div class="stack">
+        <div class="editor-field"><label for="draft-title">Title</label><input id="draft-title" name="title" value="{{ form.get('title', assignment.title) }}" maxlength="240" required {{ invalid(errors,'title') }}>{{ field_error(errors,'title') }}</div>
+        <div class="editor-field"><label for="draft-instructions">Student-facing instructions</label><textarea id="draft-instructions" name="instructions" rows="5" maxlength="5000" required {{ invalid(errors,'instructions') }}>{{ form.get('instructions', assignment.instructions) }}</textarea>{{ field_error(errors,'instructions') }}</div>
+        <div class="editor-field"><label for="draft-deadline">Deadline ({{ assignment.timezone }})</label><input type="datetime-local" id="draft-deadline" name="due_at" value="{{ form.get('due_at', assignment.due_at|local_input(assignment.timezone)) }}" required {{ invalid(errors,'due_at') }}>{{ field_error(errors,'due_at') }}</div>
+      </div>
+      <fieldset class="student-picker" {% if errors.get('recipients') %}aria-describedby="recipients-error"{% endif %}>
+        <legend>Recipients</legend>
+        {{ field_error(errors,'recipients') }}
+        {% for student in draft_students %}
+        <label class="check-row"><input type="checkbox" name="student_ids" value="{{ student.id }}" {% if student.id in draft_recipient_ids %}checked{% endif %}><span>{{ student.name }}<small>{{ student.email }}</small></span></label>
+        {% else %}<p class="empty">Enroll a student in this class before updating the draft.</p>{% endfor %}
+      </fieldset>
+    </div>
+    <div class="actions"><button class="primary">Save draft changes</button><a class="ghost-button button-link" href="{{ assignment|assignment_path(workspace) }}#instructions">Back to draft review</a></div>
+  </form>
+  {% else %}
   <p class="preserve-lines">{{ assignment.instructions }}</p>
   <dl class="details-grid">
     <div><dt>Class</dt><dd>{{ classroom.name }}</dd></div>
@@ -34,12 +56,20 @@
   {% if assignment.status == "draft" and not classroom.archived_at %}
   <form class="section-divider stack" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/publish#instructions">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    {% if errors.get('publish') %}<div class="error" role="alert">{{ errors.publish }} <a href="#edit-details">Edit draft details</a></div>{% endif %}
+    {% if errors.get('publish') %}<div class="error" role="alert">{{ errors.publish }} <a href="{{ assignment|assignment_path(workspace) }}?edit=draft#instructions">Edit draft details</a></div>{% endif %}
+    {% if assignment.original_request %}<p class="field-hint">Check the instructions, numbers, recipients, and deadline against your original wording before publishing.</p>{% endif %}
     <p class="field-hint">Publishing makes the assignment visible to these students, queues Telegram notifications for linked accounts, and schedules reminders.</p>
-    <div class="actions"><button class="primary">Publish assignment</button><a class="ghost-button button-link" href="#edit-details">Edit draft details</a></div>
+    <div class="actions"><button class="primary">Publish assignment</button><a class="ghost-button button-link" href="{{ assignment|assignment_path(workspace) }}?edit=draft#instructions">Edit draft details</a></div>
   </form>
   {% elif assignment.status == "cancelled" %}
   <p class="notice">This assignment is closed. Students cannot submit new work and future reminders have stopped.</p>
+  {% endif %}
+  {% endif %}
+  {% if assignment.status == 'draft' and assignment.original_request %}
+  <details class="disclosure-inline section-divider">
+    <summary>Original text or transcript</summary>
+    <p class="preserve-lines">{{ assignment.original_request }}</p>
+  </details>
   {% endif %}
 </section>
 
@@ -97,7 +127,8 @@
 
 {% if assignment.status != "cancelled" and not classroom.archived_at %}
 <section class="card" id="edit-details" aria-labelledby="edit-title">
-  <h2 id="edit-title">Edit assignment details</h2>
+  <h2 id="edit-title">{{ 'Draft options' if assignment.status == 'draft' else 'Edit assignment details' }}</h2>
+  {% if assignment.status != 'draft' or not editing_draft and (errors.get('due_at') or errors.get('instructions')) %}
   <div class="form-grid">
     <form class="stack edit-panel" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/deadline#edit-details" data-guard-unsaved {% if errors.get('due_at') %}data-unsaved{% endif %}>
       <h3>Deadline</h3>
@@ -118,6 +149,7 @@
       <div class="actions"><button class="ghost-button">Save instructions</button></div>
     </form>
   </div>
+  {% endif %}
   <details class="disclosure-inline section-divider">
     <summary>{{ 'Cancel draft' if assignment.status == 'draft' else 'Cancel assignment' }}</summary>
     <form class="stack" method="post" action="/{{ workspace }}/assignments/{{ assignment.id }}/cancel">

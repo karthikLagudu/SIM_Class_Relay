@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,8 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     llm_confidence_threshold: float = Field(default=0.75, ge=0, le=1)
     openai_model: str = "gpt-5-mini"
+    speech_mode: Literal["off", "openai"] = "off"
+    openai_transcription_model: str = "gpt-transcribe"
     telegram_mode: str = "log"
     telegram_bot_token: str | None = None
     telegram_bot_username: str | None = None
@@ -63,6 +66,8 @@ class Settings(BaseSettings):
             raise ValueError("Set a long random SESSION_SECRET for production")
         if self.telegram_mode == "real" and not self.telegram_bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required when TELEGRAM_MODE=real")
+        if self.speech_mode == "openai" and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when SPEECH_MODE=openai")
         return self
 
 

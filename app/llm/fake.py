@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
+from app.llm.assignment_text import (
+    AMBIGUOUS_NUMBER,
+    CLASS_QUALIFIER,
+    GRADE_REFERENCE,
+    RECIPIENT_PREFIX,
+    parse_known_deadline,
+    split_deadline,
+)
 from app.llm.base import LLMProvider
 from app.llm.schemas import AssignmentIntent, ProgressIntent, StudentIntent, TeacherIntent
 
-WEEKDAYS = {
-    name.lower(): number
-    for number, name in enumerate(
-        ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    )
+WORK_TYPOS = {
+    "qstns": "questions",
+    "qstn": "question",
+    "questons": "questions",
+    "frm": "from",
+    "chptr": "chapter",
+    "complet": "complete",
+    "uplod": "upload",
+    "workseet": "worksheet",
 }
 
 
@@ -21,57 +32,81 @@ class DemoLLM(LLMProvider):
     def interpret_assignment(
         self, text: str, timezone_name: str, now: datetime
     ) -> AssignmentIntent:
-        clean = " ".join(text.split())
-        if len(clean) < 8 or "???" in clean:
+        clean = text.strip()
+
+        def clarify(question: str) -> AssignmentIntent:
             return AssignmentIntent(
                 intent="clarify",
                 title="Clarification needed",
                 instructions=clean or "Missing details",
                 due_at=now + timedelta(days=1),
                 confidence=0.2,
-                clarification_question="What should students do, and when is it due?",
+                clarification_question=question,
             )
-        local_now = now.astimezone(ZoneInfo(timezone_name))
-        lower = clean.lower()
-        due = local_now + timedelta(days=1)
-        due = due.replace(hour=18, minute=0, second=0, microsecond=0)
-        if "tomorrow afternoon" in lower:
-            due = due.replace(hour=15)
-        elif "tomorrow morning" in lower:
-            due = due.replace(hour=9)
-        elif "tomorrow evening" in lower:
-            due = due.replace(hour=18)
-        else:
-            match = re.search(
-                r"(?:(next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", lower
+
+        if len(clean) < 8 or "???" in clean:
+            return clarify("What should students do, and when is it due?")
+        work, expression = split_deadline(clean)
+        try:
+            due = parse_known_deadline(expression or "", timezone_name, now)
+        except ValueError as exc:
+            return clarify(
+                str(exc) if str(exc).endswith("?") else "What exact date and time should this be due?"
             )
-            if match:
-                target = WEEKDAYS[match.group(2)]
-                days = (target - local_now.weekday()) % 7
-                if match.group(1):
-                    days = 7 - local_now.weekday() + target
-                elif days == 0 and local_now.hour >= 18:
-                    days = 7
-                due = (local_now + timedelta(days=days)).replace(
-                    hour=18, minute=0, second=0, microsecond=0
-                )
-        tm = re.search(r"(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", lower)
-        if tm:
-            hour = int(tm.group(1)) % 12 + (12 if tm.group(3) == "pm" else 0)
-            due = due.replace(hour=hour, minute=int(tm.group(2) or 0))
-        title_source = re.split(
-            r"\b(?:due|by|tomorrow|next\s+|monday|tuesday|wednesday|thursday|friday)\b",
-            clean,
-            maxsplit=1,
+        if due is None:
+            return clarify("When is this due? Include a day or date and a time, such as tomorrow at 6 PM.")
+        if AMBIGUOUS_NUMBER.search(work):
+            return clarify("What exact question, page, or chapter numbers should students use?")
+        class_matches = list(GRADE_REFERENCE.finditer(work))
+        if len(class_matches) > 1:
+            return clarify("Which single class should receive this assignment?")
+        class_reference = None
+        if class_matches:
+            match = class_matches[0]
+            suffix = CLASS_QUALIFIER.match(work, match.end())
+            end = suffix.end(1) if suffix else match.end()
+            class_reference = work[match.start() : end]
+            work = work[: match.start()] + work[end:]
+        student_targets = []
+        addressed = RECIPIENT_PREFIX.match(work)
+        if addressed:
+            references = addressed[1] or addressed[2]
+            student_targets = [
+                name.strip()
+                for name in re.split(r",|\s+and\s+", references, flags=re.IGNORECASE)
+                if name.strip()
+            ]
+            work = work[addressed.end() :]
+        work = re.sub(r"^(?:give|gve|assign)\b\s*", "", work, flags=re.IGNORECASE).strip(" :,-")
+        work = re.sub(r"[^\S\n]+", " ", work)
+        work = re.sub(r"\b\w+\b", lambda match: WORK_TYPOS.get(match[0].lower(), match[0]), work)
+        work = re.sub(
+            r"(\b(?:questions|pages|exercises)\s+\d+)\s*(?:\bto\b|[-–])\s*(?=\d)",
+            r"\1–",
+            work,
             flags=re.IGNORECASE,
-        )[0]
-        title = title_source.strip(" :-,.")[:80] or "Class assignment"
+        )
+        work = re.sub(r"\bchapter(?=\s+\d)", "Chapter", work, flags=re.IGNORECASE)
+        if re.match(r"^(?:questions?|pages?|the worksheet)\b", work, re.IGNORECASE):
+            work = "Complete " + work
+        if len(work) < 3:
+            return clarify("What should students complete or turn in?")
+        instructions = work[0].upper() + work[1:]
+        if instructions[-1] not in ".!?":
+            instructions += "."
+        title = re.sub(r"^(?:Complete|Do|Finish)\s+", "", instructions.splitlines()[0])
+        title = title.rstrip(".!?")
+        if len(title) > 72:
+            title = title[:72].rsplit(" ", 1)[0] or title[:72]
         return AssignmentIntent(
             intent="create_assignment",
-            title=title[0].upper() + title[1:],
-            instructions=clean,
+            title=title[:1].upper() + title[1:] if len(title) >= 3 else "Class assignment",
+            instructions=instructions,
             due_at=due,
             confidence=0.92,
+            class_reference=class_reference,
+            student_targets=student_targets,
+            due_expression=expression,
         )
 
     def interpret_progress(self, text: str) -> ProgressIntent:
@@ -122,10 +157,10 @@ class DemoLLM(LLMProvider):
                 confidence=0.9,
             )
         assignment = self.interpret_assignment(clean, timezone_name, now)
-        class_match = re.search(r"(grade\s+\d+(?:\s*-\s*|\s+)[a-z]+)", clean, re.IGNORECASE)
         return TeacherIntent(
             intent="create_assignment" if assignment.intent == "create_assignment" else "clarify",
-            class_reference=class_match.group(1) if class_match else None,
+            class_reference=assignment.class_reference,
+            student_targets=assignment.student_targets,
             title=assignment.title,
             instructions=assignment.instructions,
             due_expression=clean,

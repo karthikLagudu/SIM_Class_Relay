@@ -20,6 +20,7 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "classrooms": {"archived_at": "DATETIME"},
     "assignments": {
         "schedule_version": "INTEGER NOT NULL DEFAULT 1",
+        "original_request": "TEXT",
     },
     "feedback": {
         "idempotency_key": "VARCHAR(160)",
@@ -102,7 +103,10 @@ def begin_sqlite_write(db: Session) -> None:
 
 def get_db(request: Request) -> Generator[Session, None, None]:
     with request.app.state.session_factory() as session:
-        if request.method == "POST" and request.url.path not in {"/login", "/logout"}:
+        path = request.url.path
+        if request.method == "POST" and path not in {"/login", "/logout"} and not path.endswith(
+            "/assignments/transcribe"
+        ):
             begin_sqlite_write(session)
         yield session
 

@@ -13,6 +13,9 @@ class AssignmentIntent(BaseModel):
     due_at: datetime
     confidence: float = Field(ge=0, le=1)
     clarification_question: str | None = Field(default=None, max_length=500)
+    class_reference: str | None = Field(default=None, max_length=160)
+    student_targets: list[str] = Field(default_factory=list, max_length=50)
+    due_expression: str | None = Field(default=None, max_length=240)
 
     @field_validator("due_at")
     @classmethod

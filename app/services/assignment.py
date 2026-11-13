@@ -47,6 +47,7 @@ class AssignmentService:
         *,
         draft: bool = False,
         coordinator: bool = False,
+        original_request: str | None = None,
     ) -> Assignment:
         require = require_coordinator_class if coordinator else require_teacher_class
         classroom = require_active_class(require(db, actor, classroom_id))
@@ -93,6 +94,7 @@ class AssignmentService:
             created_by_user_id=actor.id,
             title=title.strip(),
             instructions=instructions.strip(),
+            original_request=original_request,
             status="draft" if draft else "assigned",
             due_at=due_at.astimezone(UTC),
             timezone=timezone_name,
@@ -121,6 +123,73 @@ class AssignmentService:
         db.flush()
         if not draft:
             self._activate(db, assignment, [student.id for student in students])
+        return assignment
+
+    def edit_draft(
+        self,
+        db: Session,
+        actor: User,
+        assignment_id: int,
+        title: str,
+        instructions: str,
+        due_at: datetime,
+        student_ids: list[int],
+        *,
+        coordinator: bool = False,
+    ) -> Assignment:
+        assignment = require_staff_assignment(
+            db, actor, assignment_id, coordinator=coordinator, write=True
+        )
+        if assignment.status != "draft":
+            raise ValidationError("This assignment is no longer a draft. Open the saved assignment.")
+        if not (0 < len(title.strip()) <= 240 and 0 < len(instructions.strip()) <= 5000):
+            raise ValidationError("Enter a title and instructions within the field limits.")
+        if due_at.tzinfo is None or due_at <= datetime.now(UTC):
+            raise ValidationError("Choose a future deadline.")
+        enrolled = set(
+            db.scalars(
+                select(ClassMembership.user_id).where(
+                    ClassMembership.classroom_id == assignment.classroom_id,
+                    ClassMembership.role == "student",
+                )
+            )
+        )
+        selected = set(student_ids)
+        if not selected or not selected.issubset(enrolled):
+            raise ValidationError("Select at least one student still enrolled in this class.")
+        current = {
+            target.student_id: target
+            for target in db.scalars(
+                select(AssignmentTarget).where(AssignmentTarget.assignment_id == assignment.id)
+            )
+        }
+        changed = (
+            assignment.title != title.strip()
+            or assignment.instructions != instructions.strip()
+            or assignment.due_at.replace(tzinfo=assignment.due_at.tzinfo or UTC) != due_at
+            or selected != current.keys()
+        )
+        if not changed:
+            return assignment
+        for student_id in current.keys() - selected:
+            db.delete(current[student_id])
+        for student_id in selected - current.keys():
+            db.add(AssignmentTarget(assignment_id=assignment.id, student_id=student_id))
+        assignment.title = title.strip()
+        assignment.instructions = instructions.strip()
+        assignment.due_at = due_at.astimezone(UTC)
+        db.add(
+            ActivityEvent(
+                school_id=assignment.school_id,
+                classroom_id=assignment.classroom_id,
+                actor_user_id=actor.id,
+                event_type="assignment_draft_edited",
+                entity_type="assignment",
+                entity_id=assignment.id,
+                metadata_json={"student_ids": sorted(selected), "due_at": due_at.isoformat()},
+            )
+        )
+        db.flush()
         return assignment
 
     def _activate(self, db: Session, assignment: Assignment, student_ids: list[int]) -> None:

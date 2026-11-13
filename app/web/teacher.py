@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.auth.security import validate_csrf
 from app.database import get_db
@@ -16,6 +19,15 @@ from app.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from app.llm.assignment_text import (
+    AMBIGUOUS_NUMBER,
+    GRADE_REFERENCE,
+    RECIPIENT_PREFIX,
+    parse_known_deadline,
+    reference_words,
+)
+from app.llm.schemas import AssignmentIntent
+from app.llm.speech import TranscriptionError
 from app.models import (
     ActivityEvent,
     Assignment,
@@ -57,6 +69,8 @@ from app.web.helpers import (
 from app.web.submissions import render_submission
 
 router = APIRouter()
+MAX_RECORDING_BYTES = 5 * 1024 * 1024
+RECORDING_EXTENSIONS = {"audio/webm": "webm", "audio/mp4": "m4a", "audio/ogg": "ogg"}
 
 
 @router.get("/teacher", response_class=HTMLResponse)
@@ -161,17 +175,21 @@ def _render_classwork(request, user, db, active, classes, schools):
     )
 
 
-def _render_assignment_form(
-    request, db, user, classroom, school, *, entry="natural", form=None, errors=None
-):
-    students = list(
+def _class_students(db: Session, classroom_id: int) -> list[User]:
+    return list(
         db.scalars(
             select(User)
             .join(ClassMembership, ClassMembership.user_id == User.id)
-            .where(ClassMembership.classroom_id == classroom.id, ClassMembership.role == "student")
+            .where(ClassMembership.classroom_id == classroom_id, ClassMembership.role == "student")
             .order_by(User.name)
         )
     )
+
+
+def _render_assignment_form(
+    request, db, user, classroom, school, *, entry="natural", form=None, errors=None
+):
+    students = _class_students(db, classroom.id)
     return render(
         request,
         "teacher/new_assignment.html",
@@ -186,6 +204,7 @@ def _render_assignment_form(
         csrf_token=csrf(request),
         idempotency_key=(form or {}).get("idempotency_key") or operation_key("assignment"),
         selected_ids=(form or {}).get("student_ids", [student.id for student in students]),
+        speech_available=request.app.state.speech_provider is not None,
     )
 
 
@@ -213,6 +232,134 @@ def new_assignment(
         db.get(School, classroom.school_id),
         entry="manual" if entry == "manual" else "natural",
     )
+
+
+@router.post("/teacher/classes/{class_id}/assignments/transcribe")
+async def transcribe_assignment(
+    request: Request,
+    class_id: int,
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, request.headers.get("x-csrf-token", ""))
+    require_active_class(require_teacher_class(db, user, class_id))
+    provider = request.app.state.speech_provider
+    if provider is None:
+        raise HTTPException(503, "Dictation is unavailable. You can still type the assignment.")
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    extension = RECORDING_EXTENSIONS.get(content_type)
+    if extension is None:
+        raise HTTPException(
+            415, "This recording format is unsupported. Type the work or try another browser."
+        )
+    audio = bytearray()
+    async for chunk in request.stream():
+        if len(audio) + len(chunk) > MAX_RECORDING_BYTES:
+            raise HTTPException(413, "The recording is too large. Try a shorter recording.")
+        audio.extend(chunk)
+    if not audio:
+        raise HTTPException(422, "The recording is empty. Try recording again.")
+    try:
+        transcript = await run_in_threadpool(
+            provider.transcribe, bytes(audio), f"assignment.{extension}", content_type
+        )
+    except TranscriptionError as exc:
+        raise HTTPException(502, "Transcription failed. Try recording again or type the work.") from exc
+    if not transcript or not transcript.strip():
+        raise HTTPException(422, "No speech was recognized. Try again or type the work.")
+    if len(transcript) > 5000:
+        raise HTTPException(422, "The transcript is too long. Try a shorter recording.")
+    return {"text": transcript}
+
+
+def _take_source_phrase(text: str, phrase: str) -> str | None:
+    words = r"\s+".join(re.escape(word) for word in phrase.split())
+    if not words:
+        return None
+    match = re.search(rf"(?<!\w){words}(?!\w)", text, re.IGNORECASE)
+    return text[: match.start()] + " " + text[match.end() :] if match else None
+
+
+def _resolve_natural_draft(
+    parsed: AssignmentIntent,
+    source: str,
+    classroom: Classroom,
+    school: School,
+    students: list[User],
+    selected_ids: list[int] | None,
+    now: datetime,
+) -> tuple[datetime, list[int] | None]:
+    work = source
+    expression = parsed.due_expression
+    if not expression or (work := _take_source_phrase(work, expression)) is None:
+        raise LLMInterpretationError("What day and time should the assignment be due?")
+    try:
+        known = parse_known_deadline(expression, school.timezone, now)
+        local = parsed.due_at.astimezone(ZoneInfo(school.timezone))
+        deadline = parse_local_deadline(local.replace(tzinfo=None).isoformat(), school.timezone)
+        if local.utcoffset() != parsed.due_at.utcoffset() or (known and deadline != known):
+            raise ValueError
+    except (ValidationError, ValueError) as exc:
+        raise LLMInterpretationError(
+            "What exact date and time should the assignment be due in the school’s time zone?"
+        ) from exc
+    if deadline <= now:
+        raise LLMInterpretationError(
+            "The deadline is in the past. What future date and time should I use?"
+        )
+
+    # The class selector sets scope. A conflicting name in the text must never silently reroute it.
+    if parsed.class_reference:
+        reference = reference_words(parsed.class_reference)
+        name = reference_words(classroom.name)
+        short_name = re.match(r"grade \d+ [a-z]\b", name)
+        allowed = {name}
+        if short_name:
+            allowed.update((short_name[0], short_name[0].removeprefix("grade ")))
+        work = _take_source_phrase(work, parsed.class_reference)
+        if reference not in allowed or work is None:
+            raise LLMInterpretationError(
+                f"Did you mean {classroom.name}? Correct the class in your description "
+                "or open the assignment form for the intended class."
+            )
+    if GRADE_REFERENCE.search(work):
+        raise LLMInterpretationError(
+            f"Is {classroom.name} the intended class? Use its full name or leave the class to the selector."
+        )
+
+    if not parsed.student_targets and RECIPIENT_PREFIX.match(work):
+        raise LLMInterpretationError(
+            "Who should receive the assignment? Enter their full names or use the recipient checkboxes."
+        )
+    named_ids = set()
+    for target in parsed.student_targets:
+        name_or_email = target.strip().casefold()
+        matches = [
+            student.id
+            for student in students
+            if name_or_email in {student.name.casefold(), student.email.casefold()}
+        ]
+        work = _take_source_phrase(work, target)
+        if len(matches) != 1 or work is None:
+            raise LLMInterpretationError(
+                f"Which student did you mean by “{target}”? Use their full name or email in {classroom.name}."
+            )
+        named_ids.add(matches[0])
+    if named_ids and selected_ids is not None and set(selected_ids) not in (
+        named_ids, {student.id for student in students}
+    ):
+        raise LLMInterpretationError(
+            "Who should receive the assignment? Make the names in the description match "
+            "the selected recipients."
+        )
+    if AMBIGUOUS_NUMBER.search(work) or re.findall(r"\d+", work) != re.findall(
+        r"\d+", parsed.instructions
+    ):
+        raise LLMInterpretationError(
+            "What exact question, page, or chapter numbers should students use? "
+            "Check the numbers in your description."
+        )
+    return deadline, sorted(named_ids) if named_ids else selected_ids
 
 
 @router.post("/coordinator/assignments")
@@ -245,6 +392,7 @@ def create_assignment(
         "idempotency_key": idempotency_key,
     }
     errors = {}
+    targets = student_ids if targeting_mode == "selected" else None
     if targeting_mode == "selected" and not student_ids:
         errors["recipients"] = "Choose at least one student."
     if entry == "manual":
@@ -269,8 +417,18 @@ def create_assignment(
     try:
         if entry != "manual":
             try:
+                now = datetime.now(UTC)
                 parsed = request.app.state.llm_service.assignment(
-                    db, user.id, natural_text, school.timezone, datetime.now(UTC)
+                    db, user.id, natural_text, school.timezone, now
+                )
+                deadline, targets = _resolve_natural_draft(
+                    parsed,
+                    natural_text,
+                    classroom,
+                    school,
+                    _class_students(db, classroom.id),
+                    targets,
+                    now,
                 )
             except LLMInterpretationError as exc:
                 db.commit()
@@ -284,7 +442,7 @@ def create_assignment(
                     form=values,
                     errors={"natural_text": str(exc)},
                 )
-            title, instructions, deadline = parsed.title, parsed.instructions, parsed.due_at
+            title, instructions = parsed.title, parsed.instructions
         assignment = request.app.state.assignment_service.create(
             db,
             user,
@@ -294,9 +452,10 @@ def create_assignment(
             deadline,
             school.timezone,
             idempotency_key,
-            student_ids if targeting_mode == "selected" else None,
-            draft=draft,
+            targets,
+            draft=draft or entry != "manual",
             coordinator=_workspace(request) == "coordinator",
+            original_request=natural_text if entry != "manual" else None,
         )
         db.commit()
     except (ValidationError, IntegrityError, OperationalError) as exc:
@@ -362,13 +521,80 @@ def teacher_assignment(
     request: Request,
     assignment_id: int,
     class_id: int | None = None,
+    edit: str = "",
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
-    return _render_assignment(request, user, db, assignment_id, class_id=class_id)
+    return _render_assignment(
+        request, user, db, assignment_id, class_id=class_id, edit_draft=edit == "draft"
+    )
 
 
-def _render_assignment(request, user, db, assignment_id, *, class_id=None, errors=None, form=None):
+@router.post("/coordinator/assignments/{assignment_id}/draft")
+@router.post("/teacher/assignments/{assignment_id}/draft")
+def save_draft(
+    request: Request,
+    assignment_id: int,
+    title: str = Form(),
+    instructions: str = Form(),
+    due_at: str = Form(),
+    csrf_token: str = Form(),
+    student_ids: list[int] = Form(default=[]),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    coordinator = _workspace(request) == "coordinator"
+    assignment = require_staff_assignment(
+        db, user, assignment_id, coordinator=coordinator, write=True
+    )
+    form = {"title": title, "instructions": instructions, "due_at": due_at, "student_ids": student_ids}
+    errors = {}
+    if not title.strip() or len(title) > 240:
+        errors["title"] = "Enter a title of up to 240 characters."
+    if not instructions.strip() or len(instructions) > 5000:
+        errors["instructions"] = "Enter instructions of up to 5,000 characters."
+    try:
+        deadline = parse_local_deadline(due_at, assignment.timezone)
+        if deadline <= datetime.now(UTC):
+            errors["due_at"] = "Choose a future deadline."
+    except ValidationError as exc:
+        errors["due_at"] = str(exc)
+    if not student_ids:
+        errors["recipients"] = "Choose at least one student."
+    if not errors:
+        try:
+            assignment = request.app.state.assignment_service.edit_draft(
+                db,
+                user,
+                assignment_id,
+                title,
+                instructions,
+                deadline,
+                student_ids,
+                coordinator=coordinator,
+            )
+            db.commit()
+        except (ValidationError, IntegrityError, OperationalError) as exc:
+            db.rollback()
+            errors["draft"] = (
+                str(exc) if isinstance(exc, ValidationError)
+                else "The draft could not be saved. Your edits are still here. Try saving again."
+            )
+    if errors:
+        return _render_assignment(
+            request, user, db, assignment_id, errors=errors, form=form, edit_draft=True
+        )
+    return redirect_with_message(
+        assignment_path(assignment, _workspace(request)),
+        "Draft updated. Review the saved details, then publish when you’re ready.",
+        anchor="instructions",
+    )
+
+
+def _render_assignment(
+    request, user, db, assignment_id, *, class_id=None, errors=None, form=None, edit_draft=False
+):
     errors, form = errors or {}, form or {}
     assignment = require_staff_assignment(
         db, user, assignment_id, coordinator=_workspace(request) == "coordinator"
@@ -376,6 +602,7 @@ def _render_assignment(request, user, db, assignment_id, *, class_id=None, error
     if class_id is not None and assignment.classroom_id != class_id:
         raise NotFoundError("Assignment not found in this class")
     classroom = db.get(Classroom, assignment.classroom_id)
+    editing = edit_draft and assignment.status == "draft" and not classroom.archived_at
     recipients = list(
         db.scalars(
             select(User)
@@ -458,6 +685,9 @@ def _render_assignment(request, user, db, assignment_id, *, class_id=None, error
             )
         },
         recipients=recipients,
+        editing_draft=editing,
+        draft_students=_class_students(db, classroom.id) if editing else [],
+        draft_recipient_ids=form.get("student_ids", [student.id for student in recipients]),
         student_names={student.id: student.name for student in recipients},
         student_states={state.student_id: state for state, _ in rows},
         delivery_keys=delivery_keys,

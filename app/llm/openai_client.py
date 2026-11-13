@@ -44,8 +44,16 @@ class OpenAIProvider(LLMProvider):
         self, text: str, timezone_name: str, now: datetime
     ) -> AssignmentIntent:
         system = (
-            "Extract a classroom assignment. Resolve relative dates using the supplied current time and timezone. "
-            "Use clarify when core work or deadline is ambiguous. Do not invent class/user/database identifiers. "
+            "Prepare a teacher-reviewed assignment draft. Write a short title and student-facing instructions. "
+            "Fix obvious spelling, grammar, punctuation and formatting. Preserve the original work, names, "
+            "question and page numbers, ranges, chapter references, materials, and deliverables. Never guess "
+            "a name, number, or missing range endpoint. Preserve the written form of numbers except for range punctuation. "
+            "Keep routing and deadlines separate from instructions. Copy any explicit class name into class_reference "
+            "and each intended student's name or email into student_targets, verbatim and without guessing. "
+            "Leave references empty when the teacher did not name a class or students. Ask for clarification for "
+            "ambiguous recipient descriptions, conflicting or uncertain classes, numbers, work, or deadlines. "
+            "Copy the exact deadline words from the message into due_expression and resolve them using the supplied "
+            "current time and school timezone. Do not invent database identifiers. "
             + DEADLINE_RULES
         )
         return self._structured(

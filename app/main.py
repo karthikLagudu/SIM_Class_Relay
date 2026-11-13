@@ -24,6 +24,7 @@ from app.database import SessionLocal, init_db
 from app.dependencies import build_llm_provider
 from app.exceptions import AuthorizationError, DomainError, NotFoundError
 from app.llm.service import LLMService
+from app.llm.speech import OpenAISpeechProvider
 from app.reminders.worker import reminder_loop
 from app.services.assignment import AssignmentService
 from app.services.notification import NotificationService
@@ -75,6 +76,11 @@ def create_app() -> FastAPI:
         review_status=review_status,
     )
     app.state.llm_service = LLMService(provider, settings.llm_confidence_threshold)
+    app.state.speech_provider = (
+        OpenAISpeechProvider(settings.openai_api_key, settings.openai_transcription_model)
+        if settings.speech_mode == "openai" and settings.openai_api_key
+        else None
+    )
     app.state.telegram_client = telegram_client
     app.state.notification_service = NotificationService(telegram_client)
     app.state.telegram_link_service = TelegramLinkService(settings)

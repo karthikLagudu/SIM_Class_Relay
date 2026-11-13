@@ -44,6 +44,8 @@ Grade 8 - A uses invite `CLASS8A`. A fresh seed assigns the teacher and Student 
 | `LLM_MODE` | `fake` for an offline demo. Set `real` to enable language understanding with OpenAI. |
 | `OPENAI_API_KEY` | Required in real LLM mode. |
 | `OPENAI_MODEL` | `gpt-5-mini`. Set a model available to your account that supports Structured Outputs. |
+| `SPEECH_MODE` | `off` by default. Set `openai` with `OPENAI_API_KEY` to enable dictation in the teacher assignment form. |
+| `OPENAI_TRANSCRIPTION_MODEL` | `gpt-transcribe` by default. |
 | `LLM_CONFIDENCE_THRESHOLD` | `0.75`. Low-confidence intent needs clarification. |
 | `TELEGRAM_MODE` | `log` for local delivery records or `real` for the Bot API. |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` | BotFather token and bot username. The username enables connection links. |

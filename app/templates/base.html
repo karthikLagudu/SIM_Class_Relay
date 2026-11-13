@@ -3,6 +3,39 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    (() => {
+      const key = "class-relay-theme";
+      const root = document.documentElement;
+      const schemes = document.querySelector('meta[name="color-scheme"]');
+      const readTheme = () => {
+        try { return localStorage.getItem(key); } catch { return null; }
+      };
+      const applyTheme = (choice) => {
+        const mode = choice === "light" || choice === "dark" ? choice : "system";
+        root.dataset.colorMode = mode;
+        schemes.content = mode === "system" ? "light dark" : mode;
+        return mode;
+      };
+      applyTheme(readTheme());
+
+      document.addEventListener("DOMContentLoaded", () => {
+        const picker = document.getElementById("theme-choice");
+        picker.value = root.dataset.colorMode;
+        picker.parentElement.hidden = false;
+        picker.addEventListener("change", () => {
+          const mode = applyTheme(picker.value);
+          try { localStorage.setItem(key, mode); } catch { /* Keep the choice on this page. */ }
+        });
+        const sync = () => { picker.value = applyTheme(readTheme()); };
+        window.addEventListener("storage", (event) => {
+          if (event.storageArea === localStorage && (event.key === key || event.key === null)) sync();
+        });
+        window.addEventListener("pageshow", (event) => { if (event.persisted) sync(); });
+      }, { once: true });
+    })();
+  </script>
   <title>Class Relay | Super Intelli Machines</title>
   <link rel="icon" type="image/png" sizes="84x84" href="{{ url_for('static', path='/images/sim-mark.png') }}">
   <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}">
@@ -31,8 +64,9 @@
       </form>
       {% endif %}
     </div>
-    {% if current_class or workspaces|length > 1 or school %}
+    {% endif %}
     <div class="workspace-navigation">
+      {% if user %}
       {% if current_class or school %}
       {% set context_label = (school.name ~ ' · ' ~ current_class.name) if school and current_class else current_class.name if current_class else school.name %}
       <span class="current-class" title="{{ context_label }}">{{ context_label }}</span>{% endif %}
@@ -41,9 +75,16 @@
         {% for role, label in workspaces.items() %}<a href="/{{ role }}" {% if role == workspace %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
       </nav>
       {% endif %}
+      {% endif %}
+      <div class="theme-picker" hidden>
+        <label for="theme-choice">Theme</label>
+        <select id="theme-choice">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
     </div>
-    {% endif %}
-    {% endif %}
     </div>
     {% if user and workspace %}
     <div class="workspace-tools">

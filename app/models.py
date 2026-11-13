@@ -125,6 +125,7 @@ class Assignment(Base):
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(String(240))
     instructions: Mapped[str] = mapped_column(Text)
+    original_request: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(24), default="assigned")
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     timezone: Mapped[str] = mapped_column(String(80))

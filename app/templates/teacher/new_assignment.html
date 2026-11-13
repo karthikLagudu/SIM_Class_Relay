@@ -39,10 +39,28 @@
       <div class="editor-field"><label for="assignment-instructions">Instructions</label><textarea id="assignment-instructions" name="instructions" rows="5" maxlength="5000" required {{ invalid(errors,'instructions') }}>{{ form.get('instructions','') }}</textarea>{{ field_error(errors,'instructions') }}</div>
       <div class="editor-field"><label for="assignment-due">Deadline ({{ school.timezone }})</label><input type="datetime-local" id="assignment-due" name="due_at" value="{{ form.get('due_at','') }}" required {{ invalid(errors,'due_at') }}>{{ field_error(errors,'due_at') }}</div>
     {% else %}
-      <label for="natural-text">Work and deadline
+      <div class="editor-field">
+        <label for="natural-text">Work and deadline</label>
         <textarea id="natural-text" name="natural_text" rows="5" maxlength="5000" required aria-describedby="assignment-example{% if errors.get('natural_text') %} natural_text-error{% endif %}" {% if errors.get('natural_text') %}aria-invalid="true"{% endif %}>{{ form.get('natural_text','') }}</textarea>
         {{ field_error(errors,'natural_text') }}
-      </label>
+      </div>
+      {% if workspace == 'teacher' %}
+      {% if speech_available %}
+      <div class="dictation" data-dictation data-endpoint="/teacher/classes/{{ classroom.id }}/assignments/transcribe" hidden>
+        <div class="actions">
+          <button type="button" class="ghost-button" data-record aria-describedby="dictation-privacy">
+            <span aria-hidden="true">🎙</span> Start recording
+          </button>
+          <button type="button" class="ghost-button" data-stop hidden>Stop and transcribe</button>
+          <button type="button" class="ghost-button" data-cancel hidden>Cancel recording</button>
+        </div>
+        <p class="field-hint" id="dictation-privacy">Record up to 60 seconds. Stopping sends the audio to OpenAI for transcription. Class Relay discards the recording after processing.</p>
+        <p class="dictation-status" role="status" data-record-status></p>
+      </div>
+      {% else %}
+      <p class="field-hint">Dictation is unavailable. You can type the work above or enter the details manually.</p>
+      {% endif %}
+      {% endif %}
       <p class="field-hint" id="assignment-example">Example: “Complete questions 1–10 from the energy worksheet and upload a photo by tomorrow at 6 PM.”</p>
     {% endif %}
     </div>
@@ -55,10 +73,15 @@
       {% endfor %}
     </fieldset>
     </div>
-    <div class="actions"><button class="primary">Save as draft</button><a class="ghost-button button-link" href="{{ classwork_url }}">Back to classwork</a></div>
+    <div class="actions"><button class="primary" data-save-assignment>{{ 'Save as draft' if entry == 'manual' else 'Review draft' }}</button><a class="ghost-button button-link" href="{{ classwork_url }}">Back to classwork</a></div>
     <p class="field-hint">Review the draft before publishing. Students receive notifications only after you publish.</p>
   </form>
 </section>
 {% endif %}
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', path='/js/unsaved.js') }}" defer></script>{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', path='/js/unsaved.js') }}" defer></script>
+{% if entry == 'natural' and workspace == 'teacher' and speech_available %}
+<script src="{{ url_for('static', path='/js/dictation.js') }}" defer></script>
+{% endif %}
+{% endblock %}
