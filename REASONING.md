@@ -12,6 +12,8 @@ Roles come from current school and class memberships. A person can coordinate on
 
 Staffing previews show the existing and proposed team for each affected class and its enrollment and review counts. Confirmation rechecks the signed preview within the SQLite write transaction, applies membership changes together, and records the change in the activity log. Archived classes keep their history and stop accepting new work or generating reminders.
 
+School-wide student removal ends the student's access across that school's classes in one transaction. Other memberships remain in place. Authorized staff retain access to past work, and Telegram delivery checks the current enrollment before sending.
+
 Candidate assignment queries are restricted before title matching. An explicit ID, normalized exact title, title prefix, and full match of meaningful query terms are tried in that order. The model may return a numeric reference only if the sender wrote it as `#ID`. An explicit classroom and qualifiers such as “today’s” narrow the lookup before title matching. Zero matches and tied matches are non-mutating clarification outcomes. This avoids the dangerous pattern of choosing globally and filtering afterward.
 
 `NotificationDelivery` carries school, class, and assignment context. Teaching views display delivery records for assigned classes. Coordinators can run due reminders for their own schools from the school overview.
@@ -46,7 +48,7 @@ Risk selection is deterministic. Blocked adds 70, overdue adds 80, revision adds
 
 ## Duplicates and failure handling
 
-The webhook reserves the update ID atomically before dispatch. Telegram update IDs, assignment operation keys, submission keys, feedback keys, delivery keys, reminder keys, targets, states, and memberships are database-unique. Deadline keys and `schedule_version` make repeated updates harmless. Callback buttons use the same deduplicated command path.
+Both Telegram transports reserve the update ID atomically before dispatch. Polling acknowledges updates by advancing its offset after the domain transaction commits. Telegram update IDs, assignment operation keys, submission keys, feedback keys, delivery keys, reminder keys, targets, states, and memberships are database-unique. Deadline keys and `schedule_version` make repeated updates harmless. Callback buttons use the same deduplicated command path.
 
 A valid domain operation is preserved when Telegram fails. The client records `failed`, error type/text, attempt count, and next attempt without recursively trying to report failure through the broken channel. The worker retries failed sends after delays of 1, 5, and 15 minutes as allowed by the configured attempt limit. Retry eligibility checks current linkage, cancellation, and deadline versions. Unlinked recipients are `skipped`; log mode is explicitly `logged`. The SQLite delivery table acts as the outbox. Domain changes and the pending row commit together. Each dispatch rechecks linkage, assignment eligibility, version, and quiet hours. The Bot API call runs outside the writer lock. A two-minute claim lets another cycle resume interrupted work. A remote success whose result was lost locally can still be retried.
 
@@ -58,4 +60,4 @@ Telegram files use `getFile`, bounded HTTP timeouts, a streamed byte limit, UUID
 
 ## SQLite and production migration
 
-SQLite is appropriate for a single-process 2-3 day take-home: foreign keys, WAL, busy timeout, a writer reservation on mutating entry points, and uniqueness constraints provide a runnable persistent slice. It is not a distributed scheduler or multi-writer production database. `create_all` is acceptable for fresh demo/test databases, but production must move to PostgreSQL with Alembic, an outbox, durable queue, leased/distributed workers, object storage, managed identity, secret management, and centralized observability.
+SQLite supports the app’s single-process design through foreign keys, WAL, a busy timeout, writer reservations, and uniqueness constraints. Startup creates missing tables and applies additive upgrades to existing SQLite files. A distributed deployment would need coordinated migrations, shared storage, and durable worker leases.

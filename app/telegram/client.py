@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime
 from urllib.parse import quote
 
-import httpx
+import httpx2 as httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 

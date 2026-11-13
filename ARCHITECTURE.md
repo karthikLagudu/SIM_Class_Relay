@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-- `app/web` owns HTTP, sessions, and forms. `classrooms.py` handles roster, invitation, and Telegram linking actions with separate coordinator and teacher route checks.
+- `app/web` owns HTTP, sessions, and forms. `classrooms.py` handles rosters, invites, and Telegram linking. `student_support.py` handles staff replies and their protected attachments. `live.py` reports an authorization-scoped version to open work and review pages.
 - `app/telegram/service.py` validates and deduplicates update envelopes; `router.py` dispatches to `teacher.py` or `student.py`; `conversation.py` persists short-lived context; `files.py` confines downloads; `client.py` is the Bot API boundary.
 - `app/services` owns authorization, classes/invites, assignment mutations, reference resolution, progress, submissions/feedback, notifications, overdue transitions, risk scoring, and the state machine.
 - `app/reminders/scheduler.py` creates durable versioned jobs, `processor.py` re-reads state and executes them, `policy.py` chooses deterministic actions, and `worker.py` polls safely. `app/services/delivery.py` dispatches committed Bot API requests and records results.
@@ -15,8 +15,8 @@ Transport handlers never authorize from user-supplied IDs. They first resolve an
 
 ```mermaid
 flowchart TD
-    Telegram --> Webhook
-    Webhook --> Dedupe[Validate envelope + update-ID dedupe]
+    Telegram --> Transport[Authenticated webhook or direct polling]
+    Transport --> Dedupe[Validate envelope + update-ID dedupe]
     Dedupe --> Router[TelegramIntentRouter]
     Router --> Commands[Command fast path]
     Router --> LLM[LLM structured interpretation]
@@ -34,7 +34,7 @@ flowchart TD
 
 Unlinked senders receive connection guidance. The bot ignores group chat updates. Callback buttons are translated into the same command path; they do not mutate state directly. Ambiguous references produce choices. A 30-minute context holds the last explicitly selected assignment or a pending teacher/student action. A file-first update stores its Telegram metadata until the student chooses an eligible assignment. Every choice is re-authorized.
 
-Primary student onboarding uses `TelegramLinkService`: an authorized teacher/coordinator creates a high-entropy token for an existing class student, only its SHA-256 digest is persisted, and a private `/start TOKEN` atomically validates membership/conflicts, saves numeric Telegram identifiers, and consumes the token. Regeneration revokes earlier unused tokens. A signed-in teacher can generate their own connection link in an authorized class. A linked student can use `/join CODE` to enroll in a class within their existing school.
+An authorized teacher or coordinator issues a private connection token for an existing class student. `TelegramLinkService` stores its SHA-256 digest. `/start TOKEN` validates membership and link conflicts, saves numeric Telegram identifiers, and consumes the token in one transaction. Regeneration revokes earlier unused tokens. Teachers and coordinators can generate their own links from authorized workspaces. A linked student can use `/join CODE` within their existing school.
 
 ## Reminder flow
 
@@ -68,7 +68,7 @@ Teacher delivery queries use assigned class IDs. Manual coordinator reminder run
 
 Telegram document/photo -> resolve authorized assignment or hold metadata for a reply -> `getFile` -> authenticated Bot API download -> streamed size check -> UUID filename under resolved `UPLOAD_DIR` -> SHA-256 hash -> idempotent `Submission`. The original filename is metadata only. Browser uploads use the same path-confinement and byte limit principles.
 
-Files are not mounted as public static data. `GET /submissions/{id}/file` loads the stored path only after teacher-class or student-owner authorization, verifies the resolved path remains below `UPLOAD_DIR`, and returns 404 for absent/out-of-root files. Images are served inline for previews; other files are attachments.
+Workspace-scoped submission and support-reply download routes check current authorization and verify the resolved file path stays below `UPLOAD_DIR`. Missing or out-of-root files return 404. Supported images can render inline, and other files are attachments.
 
 ## Transactions and idempotency
 
@@ -87,4 +87,4 @@ The model may classify intent, extract human references and relative deadlines, 
 
 ## Deployment shape
 
-The take-home is intentionally one FastAPI process, SQLite/WAL, a polling task, and local files. Production uses PostgreSQL + Alembic, an outbox, a durable queue, distributed workers with leases, object storage/malware scanning, managed identity, rate limits, secret management, and centralized logs/metrics/traces.
+The app runs in one FastAPI process with SQLite/WAL, background delivery and reminder tasks, and local files. Direct Telegram polling supports local use. Hosted HTTPS deployments can use webhooks. A distributed deployment would require coordinated migrations, shared object storage, and workers with durable leases.

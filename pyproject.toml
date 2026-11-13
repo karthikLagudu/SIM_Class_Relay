@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=84.2.1,<85"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,21 +11,21 @@ requires-python = ">=3.12"
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Topic :: Education",
 ]
 dependencies = [
-  "fastapi>=0.116,<1",
-  "uvicorn[standard]>=0.35,<1",
-  "sqlalchemy>=2.0.40,<3",
-  "pydantic-settings>=2.10,<3",
+  "fastapi>=0.162.7,<1",
+  "uvicorn[standard]>=0.54,<1",
+  "sqlalchemy>=2.1.8,<3",
+  "pydantic-settings>=2.16.3,<3",
   "jinja2>=3.1.6,<4",
-  "python-multipart>=0.0.20,<1",
-  "httpx>=0.28,<1",
-  "openai>=1.100,<3",
+  "python-multipart>=0.0.33,<1",
+  "httpx2>=2.16,<3",
+  "openai>=3.50,<4",
   "itsdangerous>=2.2,<3",
-  "python-dateutil>=2.9,<3",
-  "tzdata>=2025.2",
+  "tzdata>=2026.6",
 ]
 
 [project.urls]
@@ -33,7 +33,7 @@ Repository = "https://github.com/karthikLagudu/SIM_Class_Relay"
 "Demo guide" = "https://github.com/karthikLagudu/SIM_Class_Relay/blob/main/DEMO.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.4,<9", "pytest-cov>=6.2,<7", "ruff>=0.12,<1"]
+dev = ["pytest>=9.2,<10", "pytest-cov>=7.1,<8", "ruff>=0.17.5,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

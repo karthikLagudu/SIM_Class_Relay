@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-import httpx
+import httpx2 as httpx
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)

@@ -7,7 +7,7 @@ from itertools import count
 from time import time_ns
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx2 as httpx
 
 from app.config import get_settings
 
@@ -168,7 +168,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run the local Class Relay acceptance scenario."
     )
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8767")
     args = parser.parse_args()
     run_demo(args.base_url)
 

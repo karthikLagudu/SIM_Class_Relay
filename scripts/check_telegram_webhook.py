@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import argparse
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
+import httpx2 as httpx
 
 from app.config import get_settings
 
@@ -30,7 +31,13 @@ def format_timestamp(value: object) -> str:
         return "None"
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Check the Telegram bot’s webhook registration.")
+    parser.add_argument(
+        "--clear-for-polling", action="store_true",
+        help="Clear this Class Relay instance’s webhook and keep pending updates.",
+    )
+    args = parser.parse_args(argv)
     settings = get_settings()
     if settings.telegram_mode != "real":
         raise SystemExit("TELEGRAM_MODE must be set to real before checking the webhook")
@@ -53,6 +60,29 @@ def main() -> None:
         )
         raise SystemExit(f"Telegram rejected webhook check: {description}")
     info = payload.get("result", {})
+    if args.clear_for_polling:
+        if settings.telegram_updates != "polling":
+            raise SystemExit("Set TELEGRAM_UPDATES=polling before clearing the webhook")
+        registered = info.get("url")
+        expected = f"{settings.base_url.rstrip('/')}/telegram/webhook/{settings.telegram_webhook_secret}"
+        if not registered:
+            print("No webhook is registered. Telegram polling can start.")
+            return
+        if registered != expected:
+            raise SystemExit("The registered webhook belongs to a different configuration. Check BASE_URL and TELEGRAM_WEBHOOK_SECRET.")
+        try:
+            response = httpx.post(
+                api_url.removesuffix("getWebhookInfo") + "deleteWebhook",
+                json={"drop_pending_updates": False},
+                timeout=20,
+            )
+            response.raise_for_status()
+            if not response.json().get("ok"):
+                raise ValueError("Telegram declined the request")
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SystemExit(f"Could not clear the webhook ({type(exc).__name__})") from None
+        print("Webhook cleared. Pending updates were retained.")
+        return
     print("Telegram webhook status")
     print(f"Webhook URL: {redact_webhook_url(str(info.get('url', '')))}")
     print(f"Pending updates: {int(info.get('pending_update_count', 0) or 0)}")

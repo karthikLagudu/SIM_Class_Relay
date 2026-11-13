@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx2 as httpx
 import pytest
 from openai import OpenAI
 from sqlalchemy import func, select

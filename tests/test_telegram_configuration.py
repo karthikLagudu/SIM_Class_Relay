@@ -104,10 +104,36 @@ def test_check_webhook_reports_safe_status(monkeypatch, capsys):
         "get",
         lambda _url, timeout: FakeResponse(payload),
     )
-    check_telegram_webhook.main()
+    check_telegram_webhook.main([])
     output = capsys.readouterr().out
     assert "Webhook URL: https://classroom.example/telegram/webhook/***" in output
     assert "Pending updates: 2" in output
     assert "Allowed updates: message, callback_query" in output
     assert "unit-test-bot-token" not in output
     assert "unit-test-webhook-secret" not in output
+
+
+def test_polling_switch_clears_only_configured_webhook_and_keeps_updates(monkeypatch, capsys):
+    settings = real_settings()
+    settings.telegram_updates = "polling"
+    registered = "https://other.example/telegram/webhook/other-secret"
+    calls = []
+
+    def fake_get(_url, timeout):
+        return FakeResponse({"ok": True, "result": {"url": registered}})
+
+    def fake_post(url, json, timeout):
+        calls.append((url.rsplit("/", 1)[-1], json))
+        return FakeResponse({"ok": True})
+
+    monkeypatch.setattr(check_telegram_webhook, "get_settings", lambda: settings)
+    monkeypatch.setattr(check_telegram_webhook.httpx, "get", fake_get)
+    monkeypatch.setattr(check_telegram_webhook.httpx, "post", fake_post)
+
+    with pytest.raises(SystemExit, match="different configuration"):
+        check_telegram_webhook.main(["--clear-for-polling"])
+    assert calls == []
+    registered = f"{settings.base_url}/telegram/webhook/{settings.telegram_webhook_secret}"
+    check_telegram_webhook.main(["--clear-for-polling"])
+    assert calls == [("deleteWebhook", {"drop_pending_updates": False})]
+    assert "Pending updates were retained" in capsys.readouterr().out

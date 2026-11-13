@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     demo_mode: bool = False
     database_url: str = "sqlite:///./classroom_companion.db"
     session_secret: str = "development-only-change-me"
-    base_url: str = "http://127.0.0.1:8000"
+    base_url: str = "http://127.0.0.1:8767"
     school_timezone: str = "Asia/Kolkata"
     llm_mode: str = "fake"
     openai_api_key: str | None = None

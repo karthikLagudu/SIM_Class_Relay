@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-import httpx
+import httpx2 as httpx
 from openai import OpenAI
 from sqlalchemy import select
 

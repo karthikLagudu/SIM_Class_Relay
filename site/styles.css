@@ -167,12 +167,6 @@ main {
   font-size: 12px;
 }
 
-.card-top b {
-  color: var(--green-ink);
-  font-size: 9px;
-  letter-spacing: 0.6px;
-}
-
 .product-card h2 {
   margin: 28px 0 17px;
   font-size: 28px;
@@ -247,40 +241,6 @@ main {
   font-size: 9px;
 }
 
-.delivery {
-  margin-top: 18px;
-  padding: 12px;
-  border-radius: 8px;
-  background: #edf5e8;
-  color: var(--green-ink);
-  font-size: 11px;
-}
-
-.proof {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 20px;
-  padding: 30px max(24px, calc((100vw - 1152px) / 2));
-  background: var(--ink);
-  color: white;
-}
-
-.proof div {
-  display: flex;
-  align-items: baseline;
-  gap: 11px;
-}
-
-.proof strong {
-  color: var(--gold);
-  font-size: 34px;
-}
-
-.proof span {
-  color: rgba(255, 255, 255, 0.72);
-  font-size: 11px;
-}
-
 .section {
   max-width: 1200px;
   margin: auto;
@@ -311,13 +271,8 @@ main {
   background: var(--card);
 }
 
-.feature-grid article > span {
-  color: var(--green);
-  font-weight: 900;
-}
-
 .feature-grid h3 {
-  margin: 24px 0 9px;
+  margin: 0 0 9px;
   font-size: 21px;
   line-height: 1.18;
 }
@@ -377,16 +332,6 @@ main {
   color: white;
 }
 
-.run ul {
-  padding-left: 18px;
-}
-
-.run code {
-  padding: 2px 5px;
-  border-radius: 4px;
-  background: #ebece5;
-}
-
 .run pre {
   overflow: auto;
   padding: 26px;
@@ -397,8 +342,6 @@ main {
 }
 
 .run pre code {
-  padding: 0;
-  background: none;
   font: 13px/1.8 "Cascadia Code", Consolas, monospace;
 }
 
@@ -458,10 +401,6 @@ footer span:first-child {
   .hero {
     min-height: auto;
     padding-top: 52px;
-  }
-
-  .proof {
-    grid-template-columns: 1fr 1fr;
   }
 
   .feature-grid {

@@ -15,6 +15,7 @@ $env:UPLOAD_DIR = '.demo-data/multi-school-demo/uploads'
 $env:DEMO_MODE = 'true'
 $env:LLM_MODE = 'fake'
 $env:TELEGRAM_MODE = 'log'
+$env:TELEGRAM_UPDATES = 'webhook'
 $env:TELEGRAM_BOT_USERNAME = 'classroom_demo_bot'
 $env:REMINDER_INTERVAL_SECONDS = '0'
 $env:QUIET_HOUR_START = '0'
@@ -81,7 +82,7 @@ The remaining student logins use the same password. Willowbend uses `willow01`�
 
 ### Reviewer walkthrough
 
-1. **Onboard a class.** Sign in as Mira. Open 8A to see Mira and Arun under **Assigned teachers** and Leena and Dev’s different link statuses. In 8B, `WILLOW8B` is active and `OLDWILLOW8B` is expired. Return to the school overview, create **Grade 8 Demo Lab**, and add **Ava Cole** (`ava@willowbend.example`) as its teacher with the demo password. Open the new class, enroll **Zoya Vale** (`zoya@willowbend.example`) with the same temporary password, then generate an invitation and a Telegram link for Zoya. The invitation shows an expiry and Zoya’s link is **waiting to be used**. This tests link creation locally. Linking with the Telegram app requires a live bot.
+1. **Onboard a class.** Sign in as Mira. Open 8A to see Mira and Arun under **Assigned teachers** and Leena and Dev’s different link statuses. In 8B, `WILLOW8B` is active and `OLDWILLOW8B` is expired. Return to the school overview, create **Grade 8 Demo Lab**, and add **Ava Cole** (`ava@willowbend.example`) as its teacher with the demo password. Open the new class, enroll **Zoya Vale** (`zoya@willowbend.example`) with the same temporary password, and generate a class invitation. Switch to live Telegram to generate Zoya’s private connection link.
 2. **Switch roles and classes.** Mira can use the **Teacher** switcher and sees only 8A. Sign in as Arun to switch between 8A and 8B using **Active class**. Check **Students** and **Submissions** in each class. 8A includes Dev and Leena, 8B includes Sana and Tara, and Isha is in both. In 8A, **Rain gauge observations** has Leena’s image awaiting review, Rafi’s revision request, and Meera’s completed response. Open Leena’s image preview to see the synthetic rainfall chart. **Cloud cover notes** is already overdue for Kavi. **Pond habitat poster** is cancelled in 8B.
 3. **Publish and reschedule.** As Arun in 8B, open the **Soil texture lab** draft. Confirm Isha, Tara, and Sana as recipients and check the IST deadline before publishing. After publishing, change the deadline to a future school-local time different from the original. Under **Notifications**, check the cancelled original reminder schedule and the replacement schedule. Linked recipients have **Simulated** deliveries. Sana’s delivery is **Skipped** because she is unlinked. To try fake LLM interpretation, open **New assignment**, enter `Complete the leaf sketch by tomorrow evening`, and save a draft. Check the proposed deadline before publishing.
 4. **Submit, revise, and complete.** Sign in as Isha, filter by 8B, and open **Field sketch practice**. Submit a written description and attach a small image. As Arun, open **Needs review** from **Your classes** and find Isha’s work. As Mira in Willowbend, open **School submissions** and filter by 8B, the assignment, Isha, and **Awaiting review**. Both detail pages show the same text and image. As Mira, enter feedback such as `Label a second feature and explain its purpose` and choose **Request revision**. As Isha, read the feedback and resubmit. Both staff views show the latest attempt and link to the original. As Arun, open the latest submission and choose **Mark complete**. Mira can find it with the **Complete** filter, and Isha sees both receipts and both reviewers’ notes.
@@ -94,6 +95,12 @@ Start with a fresh full demo. As Mira, open **Teacher directory** in Willowbend.
 1. Add Ava Cole (`ava@willowbend.example`) as an unassigned teacher with the demo password. In 8A, open **Manage teaching team**, clear Arun, select Ava, and leave Mira selected. The preview shows the school, both teams, 11 enrolled students, and one submission awaiting review. Save the confirmed change.
 2. Sign in as Ava. Open 8A and complete Leena’s review. As Arun, try the old `/teacher/classes/1/assignments/2` bookmark and `/teacher/submissions/1/file` download. Both return 403, and 8B remains available.
 3. Return to Mira’s Coordinator workspace. Open 8A **Classwork & reviews** and **Management activity** to see the original authorship, previous feedback, Ava’s review, and the staffing change.
+
+### School-wide student removal
+
+1. In a disposable full demo, sign in as Mira, open Willowbend’s **Students** directory, and choose **Remove from school** for Isha, who is enrolled in 8A and 8B.
+2. Check both class memberships and the history summary on the confirmation page. Confirm the removal.
+3. Verify Isha disappears from the school directory. Existing work remains available to authorized staff in submission history, and Isha can no longer sign in without another workspace membership.
 
 ### Access checks
 
@@ -117,12 +124,13 @@ Use the [README setup](README.md#quick-start) with `python -m scripts.seed` and 
 ```dotenv
 LLM_MODE=fake
 TELEGRAM_MODE=log
+TELEGRAM_UPDATES=webhook
 REMINDER_INTERVAL_SECONDS=0
 QUIET_HOUR_START=0
 QUIET_HOUR_END=0
 ```
 
-Use `python -m uvicorn app.main:app --reload --no-access-log` in one terminal and `python -m scripts.demo` in another, using the same virtual environment and webhook secret. The script signs in with the seeded credentials and sends representative Telegram updates to localhost. It verifies the relative deadline, duplicate protection, persisted deliveries, a conversational deadline change, progress and blocker, different manual reminder decisions, text submission, feedback, final status, and teacher/student access boundaries. For another port, pass `--base-url http://127.0.0.1:8766`.
+Use `python -m uvicorn app.main:app --host 127.0.0.1 --port 8767 --no-access-log` in one terminal and `python -m scripts.demo` in another, using the same virtual environment and webhook secret. The script signs in with the seeded credentials and sends representative Telegram updates to localhost. It verifies deadlines, duplicate protection, progress and blockers, reminder decisions, text submission, feedback, and access boundaries.
 
 The output gives the assignment ID. Open `/teacher/assignments/ID` as `teacher@demo.local` and `/student/assignments/ID` as `student1@demo.local`. Stop and restart the server with the same database URL. Reload both URLs and confirm the feedback, final state, and reminder history still appear.
 

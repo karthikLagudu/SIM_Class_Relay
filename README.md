@@ -1,8 +1,8 @@
 # Class Relay
 
-Class Relay by Super Intelli Machines is a Telegram-first assignment workflow with teacher, coordinator, and student web views. Teachers can create, publish, clarify, reschedule, or cancel work, monitor risk, and review submissions. Students can join an authorized class, track deadlines, ask for help, submit text or files, and receive feedback. FastAPI and Jinja serve the UI, SQLAlchemy persists data to SQLite, and an in-process worker handles reminder jobs and delivery retries.
+Class Relay by Super Intelli Machines connects classroom assignments, progress, and feedback across web and Telegram. Coordinators manage schools, staffing, enrollments, and school-wide reviews. Teachers publish and revise assignments, track progress, and review student work. Students see their own assignments, turn in text or files, ask for help, and read feedback.
 
-This checkout extends the existing `classroom-companion` repository at `d7665d7`. It retains the existing implementation and history. [DEMO.md](DEMO.md) contains an executable local acceptance walkthrough and the real Telegram setup flow.
+The web app has a searchable demo account picker and a light/dark toggle that defaults to light. Open work and review pages check for changes every three seconds and preserve unsaved edits. Telegram uses the same records and offers a menu tailored to the linked account’s roles.
 
 ## Quick start
 
@@ -13,13 +13,13 @@ From the repository root on Windows with Python 3.12 or newer installed:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-Copy-Item .env.example .env
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 .\.venv\Scripts\python.exe -m scripts.seed
 $env:DEMO_MODE = 'true'
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --no-access-log
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8767 --no-access-log
 ```
 
-On macOS or Linux use `.venv/bin/python`, `cp .env.example .env`, and `export DEMO_MODE=true`. Run commands from the repository root so the scripts, templates, static assets, and `.env` resolve correctly. Open `http://127.0.0.1:8000` or check `GET /health`. The seed script initializes a fresh database and can be run again without duplicating the demo school. Startup also creates missing tables and applies additive upgrades. Use a fresh database to get the credentials below if you have demo data from an earlier revision.
+On macOS or Linux use `.venv/bin/python`, `cp -n .env.example .env`, and `export DEMO_MODE=true`. Run commands from the repository root. Open [Class Relay](http://127.0.0.1:8767/login) and choose **Show demo accounts**. The seed can be run again without duplicating the demo school. Startup creates missing tables and applies additive upgrades.
 
 | Account | Email | Password |
 |---|---|---|
@@ -51,7 +51,7 @@ Grade 8 - A uses invite `CLASS8A`. A fresh seed assigns the teacher and Student 
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` | BotFather token and bot username. The username enables connection links. |
 | `TELEGRAM_WEBHOOK_SECRET` | Set a long random value in real mode. The webhook verifies both the path and Telegram's matching header. |
 | `TELEGRAM_UPDATES` | `webhook` by default. Use `polling` for a local live bot without a public URL. Clear any existing webhook in Telegram with `drop_pending_updates=false` before polling and run one application process. |
-| `BASE_URL` | `http://127.0.0.1:8000`. Set your public HTTPS origin for webhook registration. |
+| `BASE_URL` | `http://127.0.0.1:8767`. Set a public HTTPS origin only for webhook registration. |
 | `TELEGRAM_LINK_TOKEN_MINUTES` | `30` minutes. |
 | `UPLOAD_DIR`, `MAX_UPLOAD_BYTES` | `uploads` and `10485760` bytes (10 MiB). |
 | `QUIET_HOUR_START`, `QUIET_HOUR_END` | School-local `22` and `7`. Equal values disable quiet hours. |
@@ -61,20 +61,17 @@ Grade 8 - A uses invite `CLASS8A`. A fresh seed assigns the teacher and Student 
 
 ### Live Telegram and OpenAI
 
-1. Create a bot with [BotFather](https://t.me/BotFather) and configure its token and username in `.env`. Set `TELEGRAM_MODE=real`, `LLM_MODE=real`, and `OPENAI_API_KEY`.
-2. Generate separate secrets for `SESSION_SECRET` and `TELEGRAM_WEBHOOK_SECRET` using `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Start a public HTTPS tunnel forwarding to local port 8000 and set `BASE_URL` to the tunnel origin. Keep Uvicorn access logging disabled because the webhook path contains the secret. Configure any proxy to redact that path too.
-3. Start the server, then run `python -m scripts.set_telegram_webhook` and `python -m scripts.check_telegram_webhook` from the configured virtual environment. See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for setup and troubleshooting.
-4. Open Grade 8 - A as the teacher, select **Connect my Telegram**, and press **Start** with your Telegram account. Generate Student 1's link and privately open it with a second Telegram account. Leave Student 2 unlinked for the scenario.
+For local use, Class Relay can receive updates directly from Telegram with `TELEGRAM_MODE=real` and `TELEGRAM_UPDATES=polling`. A hosted deployment can use an HTTPS webhook. OpenAI is optional for Telegram and can be enabled separately for assignment interpretation or dictation. Follow the [Telegram setup guide](TELEGRAM_SETUP.md).
 
-Bot commands include `/start`, `/help`, `/classes`, `/assign`, `/status`, `/reminders`, `/join CODE`, `/ack`, `/progress`, `/blocked`, and `/submit`. `/cancel` clears a pending chat request. `/join CODE EMAIL` also works when the email matches the account already connected. Use `/progress ID 50` for an explicit percentage or a natural message for interpretation. `/assign CLASS_ID` accepts task text with a deadline. The bot accepts private chats and uses the authenticated link as the sender identity. If it needs a choice, reply with the displayed `#ID` or full name. A photo can follow “Here’s my homework.” If the photo arrives first, the bot holds it for up to 30 minutes while you choose an assignment.
+Use **Connect my Telegram** from an authorized teacher or coordinator workspace. Staff can issue a private connection link for an enrolled student. Once linked, send `/start` or `/menu` to see the available actions. A student can open **My assignments** to mark work as read, report progress, ask for help, or turn in work. `/cancel` clears a pending chat action.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     Browser --> FastAPI --> Session[Signed session + CSRF]
-    Telegram --> Webhook[Authenticated webhook + update dedupe]
-    Webhook --> Intent[Typed OpenAI interpretation]
+    Telegram --> Updates[Authenticated webhook or direct polling]
+    Updates --> Intent[Update deduplication and intent handling]
     Session --> Scope[School, class and owner authorization]
     Intent --> Scope
     Scope --> Domain[Assignments, progress, review and feedback]
@@ -102,6 +99,7 @@ erDiagram
     USER ||--o{ ASSIGNMENT_TARGET : receives
     ASSIGNMENT_TARGET ||--o| STUDENT_ASSIGNMENT_STATE : tracks
     STUDENT_ASSIGNMENT_STATE ||--o{ PROGRESS_EVENT : records
+    STUDENT_ASSIGNMENT_STATE ||--o{ STUDENT_SUPPORT_REPLY : receives
     STUDENT_ASSIGNMENT_STATE ||--o{ SUBMISSION : accepts
     SUBMISSION ||--o{ FEEDBACK : receives
     ASSIGNMENT ||--o{ REMINDER : schedules
@@ -137,7 +135,7 @@ stateDiagram-v2
     Cancelled --> [*]
 ```
 
-Coordinators manage classes, staffing, and classwork within their own school. The Teacher workspace and Telegram teaching commands require a teacher membership in the class. Students see only their own targeted work and associated progress, files, reminders, and feedback. An invite permits an already-linked student to join within their school. Initial linking uses the one-time private token issued in the authenticated UI. See [REASONING.md](REASONING.md) for state, authorization, and identity trade-offs.
+Coordinators manage classes, staffing, and classwork within their own school. **Remove from school** ends student access across that school’s classes, while preserving staff access to past work and the student’s memberships elsewhere. The Teacher workspace and Telegram teaching commands require a teacher membership in the class. Students see their own targeted work and associated progress, files, reminders, support replies, and feedback. An invite permits an already-linked student to join within their school. See [REASONING.md](REASONING.md) for state, authorization, and identity decisions.
 
 ### Time, reminders, and LLM boundary
 
@@ -159,7 +157,9 @@ python -m pytest -q
 python -m scripts.run_reminders
 ```
 
-Use the virtual environment's Python for these commands. Tests mock both providers. Transport contract tests exercise the installed OpenAI SDK’s Responses parser and Telegram download and send paths without credentials. GitHub Actions runs Ruff and pytest on Python 3.12 and 3.14 for pushes and pull requests. For the executable offline walkthrough and restart check, follow [DEMO.md](DEMO.md).
+Use the virtual environment’s Python for these commands. Tests mock the external providers and exercise the installed OpenAI SDK’s Responses parser and Telegram transport paths. GitHub Actions runs Ruff and pytest on Python 3.12, 3.13, and 3.14 for pushes and pull requests. Follow the [demo guide](DEMO.md) for the executable acceptance walkthrough.
+
+The `site/` directory contains the static project overview. To publish it, configure GitHub Pages to use Actions and set the repository variable `PUBLISH_PROJECT_SITE=true`. The application runs separately on FastAPI.
 
 ## Pilot limits and production path
 

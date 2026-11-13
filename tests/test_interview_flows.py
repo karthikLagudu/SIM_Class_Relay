@@ -5,7 +5,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import httpx
+import httpx2 as httpx
 from sqlalchemy import select
 
 from app.models import (
