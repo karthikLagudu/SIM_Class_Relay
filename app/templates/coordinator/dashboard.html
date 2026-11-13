@@ -3,7 +3,15 @@
 {% block content %}
 <header class="hero compact-hero workspace-hero">
   <div><p class="eyebrow">School overview</p><h1>{{ school.name }}</h1><p>{{ school.timezone }}</p></div>
-  <div class="actions"><a class="primary button-link" href="#create-class">Create a class</a></div>
+  <div class="actions">
+    {% if can_link and not user.telegram_user_id and active_classes %}
+    <form method="post" action="/coordinator/classes/{{ active_classes[0].id }}/connect-telegram">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="ghost-button">Connect my Telegram</button>
+    </form>
+    {% endif %}
+    <a class="primary button-link" href="#create-class">Create a class</a>
+  </div>
 </header>
 <dl class="details-grid school-totals" aria-label="School totals">
   <div><dt>Teachers</dt><dd>{{ teachers|length }}</dd></div>

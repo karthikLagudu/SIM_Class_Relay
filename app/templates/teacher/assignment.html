@@ -15,6 +15,9 @@
 </header>
 {% if workspace == 'teacher' %}{{ teacher_class_nav(classroom) }}{% endif %}
 {% if classroom.archived_at %}<p class="notice">This class is archived. Classwork and feedback are read-only.</p>{% endif %}
+{% if assignment.status == "assigned" and deliveries|selectattr('kind', 'equalto', 'assignment_created')|selectattr('status', 'equalto', 'logged')|first %}
+<p class="mode-note">This assignment’s demo notifications were simulated. Students with a linked Telegram account can send <code>/assignments</code> to the live bot to find published work.</p>
+{% endif %}
 
 <nav class="section-links" aria-label="Assignment sections">
   <a href="#instructions">Instructions &amp; recipients</a>
@@ -58,7 +61,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     {% if errors.get('publish') %}<div class="error" role="alert">{{ errors.publish }} <a href="{{ assignment|assignment_path(workspace) }}?edit=draft#instructions">Edit draft details</a></div>{% endif %}
     {% if assignment.original_request %}<p class="field-hint">Check the instructions, numbers, recipients, and deadline against your original wording before publishing.</p>{% endif %}
-    <p class="field-hint">Publishing makes the assignment visible to these students, queues Telegram notifications for linked accounts, and schedules reminders.</p>
+    <p class="field-hint">{% if offline_demo %}Publishing makes this assignment visible to students and schedules reminders. This demo simulates Telegram delivery. Use the live Class Relay instance to send real notifications.{% else %}Publishing makes this assignment visible to students, queues Telegram notifications for linked accounts, and schedules reminders.{% endif %}</p>
     <div class="actions"><button class="primary">Publish assignment</button><a class="ghost-button button-link" href="{{ assignment|assignment_path(workspace) }}?edit=draft#instructions">Edit draft details</a></div>
   </form>
   {% elif assignment.status == "cancelled" %}
@@ -116,10 +119,10 @@
   <h2 id="student-status-title">Student status</h2>
   <div class="list">
   {% for state, student in state_rows %}
-    <article class="list-row" id="student-{{ student.id }}"><div><strong>{{ student.name }}</strong>
+    <a class="list-row" id="student-{{ student.id }}" href="/{{ workspace }}/classes/{{ classroom.id }}/students/{{ student.id }}?assignment_id={{ assignment.id }}#assignment-{{ assignment.id }}"><div><strong class="row-action">{{ student.name }}</strong>
       <span>{{ ('Updated ' ~ (state.last_activity_at|local_deadline(assignment.timezone))) if state.last_activity_at else 'No response yet' }}</span>
       {% if state.block_reason and state.status in ('blocked','overdue') %}<p class="preserve-lines">{{ state.block_reason }}</p>{% endif %}
-    </div><b class="badge {{ state.status }}">{{ state.status|student_status }}</b></article>
+    </div><b class="badge {{ state.status }}">{{ state.status|student_status }}</b></a>
   {% else %}<p class="empty">No student status has been recorded for this assignment.</p>{% endfor %}
   </div>
 </section>

@@ -39,7 +39,8 @@ def test_invite_cannot_claim_an_unlinked_account_by_email(app, db, data):
     assert student.telegram_user_id is None
 
 
-def test_signed_in_teacher_connects_own_telegram(client, app, db, data):
+def test_signed_in_teacher_connects_own_telegram(client, app, db, data, monkeypatch):
+    monkeypatch.setattr(app.state.settings, "telegram_mode", "real")
     teacher = data["teacher1"]
     teacher.telegram_user_id = teacher.telegram_chat_id = None
     db.commit()
@@ -56,6 +57,7 @@ def test_signed_in_teacher_connects_own_telegram(client, app, db, data):
         f"/teacher/classes/{class_id}/connect-telegram", data={"csrf_token": csrf}
     )
     assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert "tg://resolve?domain=classroom_test_bot&amp;start=" in response.text
     token = response.text.split("?start=", 1)[1].split('"', 1)[0]
     result = app.state.telegram_service.process(
         db, telegram_message(1402, 30002, f"/start {token}")

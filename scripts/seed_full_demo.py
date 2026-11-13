@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 from app.auth.security import hash_password
 from app.config import get_settings
 from app.database import Base, create_database_engine
-from app.demo import FULL_DEMO_ACCOUNTS, FULL_DEMO_SEED_KEY, FULL_DEMO_SEED_OPERATION
+from app.demo import (
+    DEMO_CHAT_PLACEHOLDERS,
+    FULL_DEMO_ACCOUNTS,
+    FULL_DEMO_SEED_KEY,
+    FULL_DEMO_SEED_OPERATION,
+)
 from app.llm.fake import DemoLLM
 from app.models import (
     ClassMembership,
@@ -106,7 +111,7 @@ def _seed_people_and_classes(db: Session) -> tuple[dict[str, User], dict[str, Cl
     }
     users: dict[str, User] = {}
     for account in FULL_DEMO_ACCOUNTS:
-        telegram_id = str(980_000_001 + len(users)) if account.linked else None
+        telegram_id = DEMO_CHAT_PLACEHOLDERS.get(account.email)
         users[account.handle] = User(
             name=account.name,
             email=account.email,

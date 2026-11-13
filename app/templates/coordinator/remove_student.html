@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="{{ directory_url }}">{{ school.name }} student directory</a></nav>
+<header class="hero compact-hero workspace-hero">
+  <div><p class="eyebrow">{{ school.name }}</p><h1>Remove student from school</h1><p>{{ student.name }} · {{ student.email }}</p></div>
+</header>
+<section class="card narrow-card stack" aria-labelledby="removal-effects">
+  <h2 id="removal-effects">What will change</h2>
+  <p>{{ student.name }} will lose their student access to {{ school.name }}, including assignments, submissions, feedback, and files. Queued student notifications, future reminders, and unused Telegram links for this school will stop.</p>
+  <h3>Affected classes ({{ classes|length }})</h3>
+  {% if classes %}
+  <ul>{% for classroom in classes %}<li>{{ classroom.name }}{% if classroom.archived_at %} (archived){% endif %}</li>{% endfor %}</ul>
+  {% else %}
+  <p>This student has no class enrollments in this school.</p>
+  {% endif %}
+  <p>Authorized staff can still see assignment history, submissions, and feedback. Access to other schools and any other role stays in place. If no workspace remains, sign-in will be blocked and Telegram will disconnect.</p>
+  <form method="post" action="{{ request.url.path }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="removal_token" value="{{ token }}">
+    <label class="check-row"><input type="checkbox" name="confirmed" value="true" required><span>Remove {{ student.name }} from {{ school.name }} and all classes listed above.</span></label>
+    <div class="actions">
+      <a class="ghost-button button-link" href="{{ directory_url }}#student-{{ student.id }}">Cancel</a>
+      <button class="danger-button">Remove from school</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

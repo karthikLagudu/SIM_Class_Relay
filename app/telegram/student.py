@@ -3,28 +3,198 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.exceptions import AmbiguousReferenceError, LLMInterpretationError, NotFoundError
+from app.exceptions import (
+    AmbiguousReferenceError,
+    AuthorizationError,
+    LLMInterpretationError,
+    NotFoundError,
+)
 from app.llm.schemas import StudentIntent
 from app.llm.service import LLMService
-from app.models import Assignment, ConversationContext, NotificationDelivery, User
+from app.models import (
+    Assignment,
+    Classroom,
+    ConversationContext,
+    Feedback,
+    NotificationDelivery,
+    Reminder,
+    StudentAssignmentState,
+    User,
+)
+from app.services.assignment import get_student_state
 from app.services.assignment_reference import AssignmentReferenceService, model_reference
+from app.services.authorization import (
+    class_membership_scope,
+    require_student_assignment,
+    student_work_scope,
+    workspace_roles,
+)
 from app.services.notification import NotificationService
 from app.services.progress import ProgressService
 from app.services.submission import SubmissionService
+from app.status_labels import student_status
 from app.telegram.client import TelegramClient
 from app.telegram.conversation import ConversationService
 from app.telegram.files import TelegramAttachment, TelegramFileService
 
+ASSIGNMENTS_PER_PAGE = 8
+MAIN_MENU = {"text": "Main menu", "callback_data": "menu"}
+
 
 class StudentConversation:
-    def __init__(self, llm: LLMService, client: TelegramClient, context: ConversationService):
+    def __init__(
+        self, llm: LLMService, client: TelegramClient, notifications: NotificationService,
+        context: ConversationService,
+    ):
         self.llm = llm
         self.client = client
+        self.notifications = notifications
         self.context = context
-        self.progress = ProgressService()
-        self.submissions = SubmissionService()
+        self.progress = ProgressService(notifications)
+        self.submissions = SubmissionService(notifications)
         self.references = AssignmentReferenceService()
-        self.files = TelegramFileService(client.settings, client)
+        self.files = TelegramFileService(client.settings, client, self.submissions)
+
+    def send_workspace_item(self, db: Session, user: User, chat_id: str, command: str) -> str:
+        if "student" not in workspace_roles(db, user):
+            raise AuthorizationError("A student account is required to open this view.")
+        if command == "/student_classes":
+            names = db.scalars(
+                select(Classroom.name)
+                .where(
+                    Classroom.id.in_(class_membership_scope(user.id, "student")),
+                    Classroom.archived_at.is_(None),
+                )
+                .order_by(Classroom.name)
+                .limit(20)
+            )
+            body = "My classes\n\n" + ("\n".join(names) or "You have no active classes yet.")
+        elif command == "/feedback":
+            rows = db.execute(
+                select(Feedback, Assignment, StudentAssignmentState.status)
+                .join(Assignment, Assignment.id == Feedback.assignment_id)
+                .join(StudentAssignmentState, StudentAssignmentState.assignment_id == Assignment.id)
+                .where(
+                    Feedback.student_id == user.id,
+                    StudentAssignmentState.student_id == user.id,
+                    Assignment.id.in_(student_work_scope(user.id)),
+                )
+                .order_by(Feedback.id.desc())
+                .limit(5)
+            ).all()
+            body = "Latest feedback\n\n" + (
+                "\n\n".join(
+                    f"{assignment.title[:90]} · {student_status(status)}\n{feedback.message[:250]}"
+                    for feedback, assignment, status in rows
+                ) or "Your teacher’s feedback will appear here."
+            )
+        elif command == "/student_reminders":
+            rows = db.execute(
+                select(Assignment, Reminder)
+                .join(Assignment, Assignment.id == Reminder.assignment_id)
+                .join(StudentAssignmentState, StudentAssignmentState.assignment_id == Assignment.id)
+                .join(Classroom, Classroom.id == Assignment.classroom_id)
+                .where(
+                    Reminder.student_id == user.id,
+                    StudentAssignmentState.student_id == user.id,
+                    StudentAssignmentState.status.not_in({"submitted", "completed", "cancelled"}),
+                    Reminder.status.in_({"pending", "deferred"}),
+                    Assignment.status == "assigned",
+                    Classroom.archived_at.is_(None),
+                    Assignment.id.in_(student_work_scope(user.id)),
+                )
+                .order_by(Reminder.scheduled_for)
+                .limit(8)
+            ).all()
+            body = "Scheduled reminders\n\n" + (
+                "\n".join(
+                    f"{assignment.title[:90]} · "
+                    f"{self.notifications.format_deadline(reminder.scheduled_for, assignment.timezone)}"
+                    for assignment, reminder in rows
+                ) or "No upcoming reminders."
+            )
+        else:
+            body = (
+                "Student help\n\nOpen My assignments and choose your work. Tap Mark as read, "
+                "Update progress, Ask for help, or Turn in work. You can send written answers, "
+                "photos, or files. Feedback shows the latest teacher notes. "
+                "Use /cancel to stop a pending action."
+            )
+        self.client.send(
+            db, user, chat_id, body, kind="help", reply_markup={"inline_keyboard": [[MAIN_MENU]]},
+        )
+        return command.removeprefix("/")
+
+    def send_assignments(self, db: Session, user: User, chat_id: str, page: int = 1) -> str:
+        rows = db.execute(
+            select(Assignment, Classroom.name, StudentAssignmentState.status)
+            .join(Classroom, Classroom.id == Assignment.classroom_id)
+            .join(StudentAssignmentState, StudentAssignmentState.assignment_id == Assignment.id)
+            .where(
+                Assignment.id.in_(student_work_scope(user.id)),
+                Assignment.status == "assigned",
+                Classroom.archived_at.is_(None),
+                StudentAssignmentState.student_id == user.id,
+            )
+            .order_by(Assignment.due_at, Assignment.id)
+            .offset((page - 1) * ASSIGNMENTS_PER_PAGE)
+            .limit(ASSIGNMENTS_PER_PAGE + 1)
+        ).all()
+        if not rows:
+            body = (
+                "No assignments yet. Published work for your classes will show up here."
+                if page == 1
+                else "There are no more assignments on this page. Send /assignments to start over."
+            )
+            self.client.send(
+                db, user, chat_id, body, kind="status",
+                reply_markup={"inline_keyboard": [[MAIN_MENU]]},
+            )
+            return "assignments"
+        lines = ["📚 My assignments", "Tap an assignment below to see the instructions."]
+        keyboard = []
+        for assignment, class_name, status in rows[:ASSIGNMENTS_PER_PAGE]:
+            deadline = NotificationService.format_deadline(assignment.due_at, assignment.timezone)
+            lines.append(
+                f"#{assignment.id} {assignment.title[:75]}\n"
+                f"{class_name[:75]} · {student_status(status)}\nDue {deadline}"
+            )
+            keyboard.append([{
+                "text": f"#{assignment.id} {assignment.title[:45]}",
+                "callback_data": f"assignment:{assignment.id}",
+            }])
+        navigation = []
+        if page > 1:
+            navigation.append({"text": "Previous", "callback_data": f"assignments:{page - 1}"})
+        if len(rows) > ASSIGNMENTS_PER_PAGE:
+            navigation.append({"text": "Next", "callback_data": f"assignments:{page + 1}"})
+        if navigation:
+            keyboard.append(navigation)
+        keyboard.append([MAIN_MENU])
+        self.client.send(
+            db, user, chat_id, "\n\n".join(lines), kind="status",
+            reply_markup={"inline_keyboard": keyboard},
+        )
+        return "assignments"
+
+    def send_assignment(self, db: Session, user: User, chat_id: str, assignment_id: int) -> str:
+        assignment = require_student_assignment(db, user, assignment_id)
+        classroom = db.get(Classroom, assignment.classroom_id)
+        if assignment.status != "assigned" or classroom.archived_at:
+            raise NotFoundError("This assignment is closed. Send /assignments to see available work.")
+        state = get_student_state(db, assignment_id, user.id)
+        body = (
+            f"{self.notifications.assignment_message(assignment, classroom)}"
+            f"\n\nYour status · {student_status(state.status)}"
+        )
+        self.client.send(
+            db, user, chat_id, body, kind="assignment_details",
+            reply_markup=self.notifications.assignment_actions(assignment_id, state.status),
+            school_id=assignment.school_id,
+            classroom_id=assignment.classroom_id,
+            assignment_id=assignment.id,
+        )
+        return f"assignment_details:{assignment_id}"
 
     def _reply_assignment(self, db: Session, user: User, chat_id: str, message: dict) -> int | None:
         reply = message.get("reply_to_message")
@@ -114,6 +284,40 @@ class StudentConversation:
 
         if context and context.pending_action in {"file_assignment", "student_intent"}:
             return self._resume_student(db, user, chat_id, text, context, assignments)
+        if context and context.pending_action in {"progress", "help_request"}:
+            assignment = self.references.choose(
+                assignments, f"#{context.active_assignment_id}", exact=True
+            )
+            percent_text = text.removesuffix("%").strip()
+            help_request = context.pending_action == "help_request"
+            percent = None
+            if not help_request and percent_text.isascii() and percent_text.isdigit():
+                if len(percent_text) > 3 or int(percent_text) > 100:
+                    raise LLMInterpretationError("Use a percentage between 0 and 100.")
+                percent = int(percent_text)
+            if not text or len(text) > 2000:
+                raise LLMInterpretationError("Send a short note so your teacher can see the update.")
+            status = "blocked" if help_request else "in_progress"
+            self.progress.update(db, user, assignment.id, status, text, percent)
+            self.context.set(db, user, chat_id, assignment_id=assignment.id)
+            reply = "Help requested. Your teacher can see your note." if help_request else "Progress saved."
+            self.client.send(db, user, chat_id, reply, kind="progress")
+            return f"progress:{assignment.id}:{status}"
+        if (
+            context and context.pending_action == "submission"
+            and (context.pending_payload_json or {}).get("accept_text") and text
+        ):
+            assignment = self.references.choose(
+                assignments, f"#{context.active_assignment_id}", exact=True
+            )
+            submission = self.submissions.submit(
+                db, user, assignment.id, f"telegram:{update_id}:submission", text_content=text
+            )
+            self.context.set(db, user, chat_id, assignment_id=assignment.id)
+            self.client.send(
+                db, user, chat_id, f"Submission #{submission.id} received.", kind="submission"
+            )
+            return f"submission:{submission.id}"
 
         parsed = self.llm.student_intent(db, user.id, text)
         if parsed.intent == "status":

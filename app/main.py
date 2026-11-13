@@ -20,7 +20,8 @@ from starlette.exceptions import HTTPException
 
 from app.auth.security import SessionManager
 from app.config import get_settings
-from app.database import SessionLocal, init_db
+from app.database import SessionLocal, begin_sqlite_write, init_db
+from app.demo import clear_demo_chat_placeholders
 from app.dependencies import build_llm_provider
 from app.exceptions import AuthorizationError, DomainError, NotFoundError
 from app.llm.service import LLMService
@@ -32,6 +33,7 @@ from app.services.reminder import ReminderService
 from app.services.telegram_link import TelegramLinkService
 from app.status_labels import delivery_status, review_status, student_status
 from app.telegram.client import TelegramClient
+from app.telegram.polling import callback_to_answer, poll_telegram, process_update
 from app.telegram.service import TelegramService
 from app.web.helpers import assignment_path, local_input, render
 from app.web.router import router as web_router
@@ -47,15 +49,23 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     init_db()
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
-    worker = asyncio.create_task(reminder_loop(app))
+    if (
+        settings.demo_mode and settings.environment == "development"
+        and settings.telegram_mode == "real"
+    ):
+        with app.state.session_factory.begin() as db:
+            begin_sqlite_write(db)
+            if clear_demo_chat_placeholders(db):
+                logger.info("Cleared seeded Telegram placeholders for live delivery.")
+    workers = [asyncio.create_task(reminder_loop(app))]
+    if settings.telegram_mode == "real" and settings.telegram_updates == "polling":
+        workers.append(asyncio.create_task(poll_telegram(app)))
     try:
         yield
     finally:
-        worker.cancel()
-        try:
-            await worker
-        except asyncio.CancelledError:
-            pass
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
         app.state.telegram_client.close()
 
 
@@ -96,6 +106,8 @@ def create_app() -> FastAPI:
         started = time.perf_counter()
         response = await call_next(request)
         response.headers["x-request-id"] = request_id
+        if request.url.path.startswith(("/student", "/api/student")):
+            response.headers["Cache-Control"] = "private, no-store"
         logged_path = (
             "/telegram/webhook/[redacted]"
             if request.url.path.startswith("/telegram/webhook/")
@@ -164,6 +176,8 @@ def create_app() -> FastAPI:
 
     @app.post("/telegram/webhook/{secret}")
     async def telegram_webhook(secret: str, request: Request):
+        if settings.telegram_updates == "polling":
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
         path_valid = secrets.compare_digest(secret.encode(), settings.telegram_webhook_secret.encode())
         header_secret = request.headers.get("x-telegram-bot-api-secret-token")
         header_valid = (
@@ -181,19 +195,9 @@ def create_app() -> FastAPI:
             return {"ok": True, "result": "ignored_malformed_json"}
         if not isinstance(update, dict):
             return {"ok": True, "result": "ignored_malformed_update"}
-        def process_update():
-            with app.state.session_factory.begin() as db:
-                return app.state.telegram_service.process(db, update)
-
-        result = await run_in_threadpool(process_update)
-        callback = update.get("callback_query")
-        callback_id = callback.get("id") if isinstance(callback, dict) else None
-        if (
-            settings.telegram_mode == "real"
-            and isinstance(callback_id, str)
-            and 0 < len(callback_id) <= 256
-            and not str(result.get("result", "")).startswith("ignored")
-        ):
+        result = await run_in_threadpool(process_update, app, update)
+        callback_id = callback_to_answer(update, result)
+        if settings.telegram_mode == "real" and callback_id:
             # Telegram can acknowledge the button directly using the webhook response.
             return {"method": "answerCallbackQuery", "callback_query_id": callback_id}
         return result

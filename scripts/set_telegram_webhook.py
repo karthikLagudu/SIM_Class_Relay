@@ -9,6 +9,8 @@ def main() -> None:
     settings = get_settings()
     if settings.telegram_mode != "real":
         raise SystemExit("TELEGRAM_MODE must be set to real before configuring a webhook")
+    if settings.telegram_updates != "webhook":
+        raise SystemExit("Set TELEGRAM_UPDATES=webhook before configuring a webhook")
     if not settings.telegram_bot_token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
     if not settings.telegram_bot_username:

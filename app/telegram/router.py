@@ -18,7 +18,7 @@ class TelegramIntentRouter:
     def __init__(self, llm: LLMService, client: TelegramClient, notifications: NotificationService):
         self.context = ConversationService(client.settings.conversation_context_minutes)
         self.teacher = TeacherConversation(llm, client, notifications, self.context)
-        self.student = StudentConversation(llm, client, self.context)
+        self.student = StudentConversation(llm, client, notifications, self.context)
 
     def route(
         self,
@@ -34,6 +34,8 @@ class TelegramIntentRouter:
             "submission",
             "file_assignment",
             "student_intent",
+            "progress",
+            "help_request",
         }
         if not pending_student and not (message.get("document") or message.get("photo")):
             classes = list_teacher_classes(db, user)

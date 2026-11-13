@@ -39,7 +39,7 @@ Grade 8 - A uses invite `CLASS8A`. A fresh seed assigns the teacher and Student 
 | `DATABASE_URL` | `sqlite:///./classroom_companion.db` |
 | `SESSION_SECRET` | Set a long random value for a shared deployment. Signs sessions and CSRF tokens. |
 | `ENVIRONMENT` | `development`. Use `production` behind HTTPS for secure cookies, required random session signing, and disabled demo seeding. |
-| `DEMO_MODE` | `false`. Set to `true` to show the login account picker on a seeded offline development server. |
+| `DEMO_MODE` | `false`. Set to `true` to show the login account picker on a seeded development server using the fake LLM. In real Telegram mode the picker is available on loopback only. |
 | `SCHOOL_TIMEZONE` | `Asia/Kolkata`, the default IANA timezone for school provisioning. |
 | `LLM_MODE` | `fake` for an offline demo. Set `real` to enable language understanding with OpenAI. |
 | `OPENAI_API_KEY` | Required in real LLM mode. |
@@ -50,6 +50,7 @@ Grade 8 - A uses invite `CLASS8A`. A fresh seed assigns the teacher and Student 
 | `TELEGRAM_MODE` | `log` for local delivery records or `real` for the Bot API. |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` | BotFather token and bot username. The username enables connection links. |
 | `TELEGRAM_WEBHOOK_SECRET` | Set a long random value in real mode. The webhook verifies both the path and Telegram's matching header. |
+| `TELEGRAM_UPDATES` | `webhook` by default. Use `polling` for a local live bot without a public URL. Clear any existing webhook in Telegram with `drop_pending_updates=false` before polling and run one application process. |
 | `BASE_URL` | `http://127.0.0.1:8000`. Set your public HTTPS origin for webhook registration. |
 | `TELEGRAM_LINK_TOKEN_MINUTES` | `30` minutes. |
 | `UPLOAD_DIR`, `MAX_UPLOAD_BYTES` | `uploads` and `10485760` bytes (10 MiB). |
@@ -158,7 +159,7 @@ python -m pytest -q
 python -m scripts.run_reminders
 ```
 
-Use the virtual environment's Python for these commands. Tests mock both providers. Transport contract tests exercise the installed OpenAI SDK’s Responses parser and Telegram download and send paths without credentials. GitHub Actions runs Ruff and pytest on Python 3.12 for pushes and pull requests. For the executable offline walkthrough and restart check, follow [DEMO.md](DEMO.md).
+Use the virtual environment's Python for these commands. Tests mock both providers. Transport contract tests exercise the installed OpenAI SDK’s Responses parser and Telegram download and send paths without credentials. GitHub Actions runs Ruff and pytest on Python 3.12 and 3.14 for pushes and pull requests. For the executable offline walkthrough and restart check, follow [DEMO.md](DEMO.md).
 
 ## Pilot limits and production path
 

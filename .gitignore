@@ -11,6 +11,6 @@ __pycache__/
 htmlcov/
 .coverage
 uploads/*
-!uploads/.gitkeep
+!uploads/README.md
 tmp/
 .demo-data/

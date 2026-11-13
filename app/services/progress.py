@@ -8,10 +8,14 @@ from app.exceptions import ValidationError
 from app.models import ActivityEvent, Classroom, ProgressEvent, User
 from app.services.assignment import get_student_state
 from app.services.authorization import require_active_class, require_student_assignment
+from app.services.notification import NotificationService
 from app.services.state_machine import transition
 
 
 class ProgressService:
+    def __init__(self, notifications: NotificationService | None = None):
+        self.notifications = notifications
+
     def update(
         self,
         db: Session,
@@ -50,4 +54,7 @@ class ProgressService:
                 metadata_json={"progress_percent": progress_percent},
             )
         )
+        if status == "blocked" and self.notifications:
+            db.flush()
+            self.notifications.notify_staff(db, assignment, student, "staff_help", event.id)
         return event

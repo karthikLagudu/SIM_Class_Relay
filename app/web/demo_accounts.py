@@ -1,5 +1,7 @@
 from collections import defaultdict
+from ipaddress import ip_address
 
+from fastapi import Request
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -15,13 +17,14 @@ from app.models import ClassMembership, Classroom, IdempotencyKey, School, Schoo
 from app.web.helpers import WORKSPACES
 
 
-def demo_account_groups(settings: Settings, db: Session) -> dict:
+def demo_account_groups(settings: Settings, db: Session, request: Request) -> dict:
     if (
         not settings.demo_mode
         or settings.environment != "development"
-        or settings.telegram_mode != "log"
         or settings.llm_mode != "fake"
     ):
+        return {}
+    if settings.telegram_mode == "real" and not _local_request(request):
         return {}
 
     full = db.get(IdempotencyKey, FULL_DEMO_SEED_KEY)
@@ -79,3 +82,12 @@ def demo_account_groups(settings: Settings, db: Session) -> dict:
                 }
             )
     return {role: accounts for role, accounts in groups.items() if accounts}
+
+
+def _local_request(request: Request) -> bool:
+    if not request.client or request.url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    try:
+        return ip_address(request.client.host).is_loopback
+    except ValueError:
+        return False

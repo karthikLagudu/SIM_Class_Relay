@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.exceptions import ValidationError
-from app.models import ActivityEvent, Assignment, Classroom, Feedback, Submission, User
+from app.models import ActivityEvent, Classroom, Feedback, Submission, User
 from app.services.assignment import get_student_state
 from app.services.authorization import (
     require_active_class,
@@ -19,6 +19,9 @@ from app.services.state_machine import transition
 
 
 class SubmissionService:
+    def __init__(self, notifications: NotificationService | None = None):
+        self.notifications = notifications
+
     def submit(
         self,
         db: Session,
@@ -31,6 +34,8 @@ class SubmissionService:
         original_filename: str | None = None,
         mime_type: str | None = None,
         content: bytes | None = None,
+        *,
+        web_receipt: bool = False,
     ) -> Submission:
         assignment = require_student_assignment(db, student, assignment_id)
         require_active_class(db.get(Classroom, assignment.classroom_id))
@@ -86,6 +91,10 @@ class SubmissionService:
                 metadata_json={"type": submission_type},
             )
         )
+        if self.notifications:
+            self.notifications.notify_staff(db, assignment, student, "staff_submission", submission.id)
+            if web_receipt:
+                self.notifications.notify_submission_receipt(db, assignment, student, submission)
         return submission
 
 
@@ -158,7 +167,6 @@ class FeedbackService:
             )
         )
         if self.notifications:
-            assignment = db.get(Assignment, submission.assignment_id)
             student = db.get(User, submission.student_id)
             self.notifications.notify_feedback(
                 db,
@@ -166,5 +174,6 @@ class FeedbackService:
                 student,
                 feedback.message,
                 f"feedback:{idempotency_key or feedback.id}",
+                complete=complete,
             )
         return feedback

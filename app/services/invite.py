@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.exceptions import InviteError
-from app.models import ClassMembership, Classroom, Invite, SchoolMembership, User
+from app.models import ActivityEvent, ClassMembership, Classroom, Invite, SchoolMembership, User
 
 
 class InviteService:
@@ -57,6 +57,14 @@ class InviteService:
                 raise InviteError("Invite code has reached its use limit")
             db.add(ClassMembership(classroom_id=classroom.id, user_id=user.id, role="student"))
             invite.use_count += 1
+            db.add(ActivityEvent(
+                school_id=classroom.school_id,
+                classroom_id=classroom.id,
+                actor_user_id=user.id,
+                event_type="student_enrolled",
+                entity_type="user",
+                entity_id=user.id,
+            ))
         user.telegram_user_id = telegram_user_id
         user.telegram_chat_id = chat_id
         return classroom

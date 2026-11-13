@@ -25,7 +25,7 @@
   <div class="card demo-card">
     <button class="ghost-button" id="demo-toggle" type="button" aria-expanded="false" aria-controls="demo-accounts">Show demo accounts</button>
     <section id="demo-accounts" aria-labelledby="demo-heading" hidden>
-      <div class="section-head"><h2 id="demo-heading">Demo accounts</h2><p class="mode-note">Telegram deliveries are simulated.</p></div>
+      <div class="section-head"><h2 id="demo-heading">Demo accounts</h2><p class="mode-note">{% if offline_demo %}Telegram deliveries are simulated.{% else %}Connect a Telegram account to receive live notifications.{% endif %}</p></div>
       <p class="field-hint">Choose an account to fill the sign-in form. Accounts with multiple roles appear in each matching group.</p>
       {% set role_labels = {"coordinator": "Coordinators", "teacher": "Teachers", "student": "Students"} %}
       <div class="section-links demo-role-filters" role="group" aria-label="Filter demo accounts by role">

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components.html" import delivery_badge, feedback_note, field_error, review_badge %}
+{% from "components.html" import delivery_badge, feedback_note, field_error, review_badge, support_reply %}
 {% block content %}
 <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/student">My assignments</a><span aria-hidden="true">/</span><a href="/student?class_id={{ classroom.id }}">{{ classroom.name }}</a></nav>
 <section class="card student-task" aria-labelledby="assignment-title">
@@ -15,6 +15,7 @@
   </section>
   <section class="next-step" id="next-action" aria-labelledby="next-title">
     <h2 id="next-title">Next action</h2>
+    {% if help_replies %}<p><a href="#teacher-help">Read help from your teacher</a></p>{% endif %}
     {% if classroom.archived_at %}<p>This class is archived. You can still read your work and feedback.</p>
     {% elif state.status == 'needs_revision' %}
     <p>Your teacher has a suggestion for your next try.</p>
@@ -77,6 +78,13 @@
   {{ feedback_note(item, feedback_authors.get(item.teacher_id, 'School staff'), feedback_outcomes.get(item.id), assignment.timezone) }}
   {% endfor %}
   {% if state.status == 'needs_revision' and can_submit %}<a class="ghost-button button-link" href="#submit-work">Go to resubmission</a>{% endif %}
+</section>
+{% endif %}
+
+{% if help_replies %}
+<section class="card" id="teacher-help" aria-labelledby="teacher-help-title">
+  <h2 id="teacher-help-title">Help from your teacher</h2>
+  {% for reply, author in help_replies %}{{ support_reply(reply, author, 'student', assignment.timezone, support_image_types) }}{% endfor %}
 </section>
 {% endif %}
 

@@ -72,3 +72,25 @@
     {% endif %}
   </div>
 {%- endmacro %}
+
+{% macro telegram_manual_link(link) %}
+<div class="stack">
+  <p class="field-hint">If your browser cannot open the link, open the Telegram app, search for <strong>@{{ link.bot_username }}</strong>, and send the command below in a private chat with the bot.</p>
+  <label>Send this one-time command in Telegram <input value="{{ link.start_command }}" readonly></label>
+</div>
+{% endmacro %}
+{% macro support_reply(reply, author, workspace, timezone, image_types) -%}
+<article class="review-feedback stack">
+  <div class="section-head"><h4>{{ author }}</h4><span class="tiny">{{ reply.created_at|local_deadline(timezone) }}</span></div>
+  {% if reply.message %}<p class="preserve-lines">{{ reply.message }}</p>{% endif %}
+  {% if reply.stored_file_path %}
+  {% set file_url = '/' ~ workspace ~ '/support-replies/' ~ reply.id ~ '/file' %}
+  <div class="submission-file">
+    {% if reply.mime_type in image_types %}
+    <a href="{{ file_url }}" aria-label="Open image {{ reply.original_filename }}"><img class="submission-preview" src="{{ file_url }}" alt="Help attachment: {{ reply.original_filename }}" loading="lazy"></a>
+    {% endif %}
+    <a class="ghost-button button-link" href="{{ file_url }}?download=true">Download {{ reply.original_filename }}</a>
+  </div>
+  {% endif %}
+</article>
+{%- endmacro %}

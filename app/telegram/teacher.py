@@ -40,7 +40,7 @@ class TeacherConversation:
         self.references = AssignmentReferenceService()
         self.risks = RiskService()
 
-    def _class_options(self, classes: list[Classroom], reference: str | None) -> list[Classroom]:
+    def class_options(self, classes: list[Classroom], reference: str | None) -> list[Classroom]:
         if reference is None:
             return classes
         if (number := explicit_id(reference)) is not None:
@@ -56,7 +56,7 @@ class TeacherConversation:
             or clean == f"grade {normalize(item.grade).removeprefix('grade ')}"
         ]
 
-    def _student_targets(
+    def student_targets(
         self, db: Session, class_id: int, references: list[str]
     ) -> list[int] | None:
         if not references:
@@ -162,7 +162,7 @@ class TeacherConversation:
             and (parsed.class_reference or parsed.intent == "create_assignment")
         ):
             class_reference = model_reference(parsed.class_reference, text)
-            options = self._class_options(classes, class_reference)
+            options = self.class_options(classes, class_reference)
             if not options:
                 raise NotFoundError(
                     "No authorized class matches that description. Use /classes to see your classes."
@@ -195,7 +195,7 @@ class TeacherConversation:
                 due_at,
                 school.timezone,
                 f"telegram:{update_id}:assignment",
-                student_ids=self._student_targets(db, classroom.id, parsed.student_targets),
+                student_ids=self.student_targets(db, classroom.id, parsed.student_targets),
             )
             self.context.set(db, user, chat_id, assignment_id=assignment.id)
             self.client.send(

@@ -14,18 +14,25 @@ from app.models import (
     Assignment,
     Classroom,
     NotificationDelivery,
+    ProgressEvent,
     Reminder,
     School,
     StudentAssignmentState,
+    Submission,
     User,
 )
 from app.reminders.policy import aware_utc, decide_reminder, in_quiet_hours, next_permitted_time
-from app.services.authorization import require_student_assignment, require_teacher_assignment
+from app.services.authorization import (
+    has_school_role,
+    require_student_assignment,
+    require_teacher_assignment,
+)
 from app.telegram.client import TelegramClient
 
 logger = logging.getLogger(__name__)
 RETRY_DELAYS = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15))
 CLAIM_TIME = timedelta(minutes=2)
+STAFF_ALERTS = {"staff_submission", "staff_help"}
 
 
 @dataclass(frozen=True)
@@ -70,7 +77,7 @@ class DeliveryProcessor:
         attempted: list[int] = []
         for delivery_id in ids:
             attempt = self._claim(delivery_id, now or datetime.now(UTC))
-            if not attempt:
+            if not attempt or not self._still_reserved(attempt):
                 continue
             try:
                 external_id = self.telegram.send_message(
@@ -82,6 +89,15 @@ class DeliveryProcessor:
                 self._finish(attempt, external_id, None, now or datetime.now(UTC))
             attempted.append(delivery_id)
         return attempted
+
+    def _still_reserved(self, attempt: DeliveryAttempt) -> bool:
+        # A removal can cancel a claim while the worker is between transactions.
+        with self.session_factory() as db:
+            row = db.get(NotificationDelivery, attempt.id)
+            return bool(
+                row and row.next_attempt_at
+                and aware_utc(row.next_attempt_at) == attempt.reserved_until
+            )
 
     @staticmethod
     def _reminder(db: Session, delivery: NotificationDelivery) -> Reminder | None:
@@ -100,12 +116,12 @@ class DeliveryProcessor:
             return None
         if not user:
             raise AuthorizationError("The Telegram recipient no longer exists")
-        check = (
-            require_teacher_assignment
-            if delivery.kind == "teacher_confirmation"
-            else require_student_assignment
-        )
-        assignment = check(db, user, delivery.assignment_id)
+        if delivery.kind in STAFF_ALERTS:
+            assignment = self._staff_assignment(db, user, delivery)
+        elif delivery.kind == "teacher_confirmation":
+            assignment = require_teacher_assignment(db, user, delivery.assignment_id)
+        else:
+            assignment = require_student_assignment(db, user, delivery.assignment_id)
         if db.get(Classroom, assignment.classroom_id).archived_at:
             raise AuthorizationError("The class was archived")
         if assignment.status == "cancelled" and delivery.kind not in {
@@ -117,6 +133,29 @@ class DeliveryProcessor:
             f"deadline:{assignment.id}:v{assignment.schedule_version}:"
         ):
             raise AuthorizationError("The deadline has changed")
+        return assignment
+
+    @staticmethod
+    def _staff_assignment(
+        db: Session, recipient: User, delivery: NotificationDelivery,
+    ) -> Assignment:
+        assignment = db.get(Assignment, delivery.assignment_id)
+        if not assignment:
+            raise NotFoundError("Assignment not found")
+        if not has_school_role(db, recipient.id, assignment.school_id, {"coordinator"}):
+            require_teacher_assignment(db, recipient, assignment.id)
+        _, _, suffix = (delivery.idempotency_key or "").partition(":")
+        event_id, _, _ = suffix.partition(":")
+        if not event_id.isascii() or not event_id.isdigit() or len(event_id) > 19:
+            raise NotFoundError("Class activity not found")
+        model = Submission if delivery.kind == "staff_submission" else ProgressEvent
+        event = db.get(model, int(event_id))
+        if not event or event.assignment_id != assignment.id:
+            raise NotFoundError("Class activity not found")
+        student = db.get(User, event.student_id)
+        if not student:
+            raise NotFoundError("Student not found")
+        require_student_assignment(db, student, assignment.id)
         return assignment
 
     def _validate_reminder(

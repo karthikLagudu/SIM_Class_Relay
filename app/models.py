@@ -189,6 +189,22 @@ class ProgressEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class StudentSupportReply(Base):
+    __tablename__ = "student_support_replies"
+    __table_args__ = (Index("ix_support_assignment_student", "assignment_id", "student_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assignment_id: Mapped[int] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"))
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    message: Mapped[str] = mapped_column(Text)
+    stored_file_path: Mapped[str | None] = mapped_column(String(500))
+    original_filename: Mapped[str | None] = mapped_column(String(240))
+    mime_type: Mapped[str | None] = mapped_column(String(120))
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Submission(Base):
     __tablename__ = "submissions"
     __table_args__ = (UniqueConstraint("idempotency_key"),)

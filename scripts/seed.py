@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.auth.security import hash_password
 from app.config import get_settings
 from app.database import SessionLocal, init_db
-from app.demo import QUICK_DEMO_ACCOUNTS, QUICK_DEMO_ASSIGNMENT_KEY
+from app.demo import QUICK_DEMO_ACCOUNTS, QUICK_DEMO_ASSIGNMENT_KEY, QUICK_DEMO_CHAT_IDS
 from app.models import (
     ClassMembership,
     Classroom,
@@ -82,7 +82,7 @@ def main() -> None:
                 account.name,
                 account.email,
                 account.password,
-                {"teacher": "900001", "student1": "900101"}.get(key) if log_mode else None,
+                QUICK_DEMO_CHAT_IDS.get(key) if log_mode else None,
             )
             for key, account in QUICK_DEMO_ACCOUNTS.items()
         }

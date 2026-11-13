@@ -88,7 +88,8 @@ def _render_class_page(
     )
     student_ids = [student.id for student in students]
     active_tokens = {}
-    if student_ids:
+    can_link = request.app.state.telegram_link_service.can_generate_links
+    if student_ids and can_link:
         active_tokens = {
             token.user_id: token
             for token in db.scalars(
@@ -137,7 +138,7 @@ def _render_class_page(
             for item in invites
             if item.expires_at and aware_utc(item.expires_at) <= datetime.now(UTC)
         },
-        can_link=bool(request.app.state.settings.telegram_bot_username),
+        can_link=can_link,
         status_code=422 if errors else 200,
         errors=errors or {},
         form=form or {},
@@ -316,6 +317,7 @@ def change_student_membership(
 
 
 @router.post("/teacher/classes/{class_id}/connect-telegram", response_class=HTMLResponse)
+@router.post("/coordinator/classes/{class_id}/connect-telegram", response_class=HTMLResponse)
 def connect_teacher_telegram(
     request: Request,
     class_id: int,
@@ -326,7 +328,12 @@ def connect_teacher_telegram(
     validate_csrf(request, csrf_token)
     classroom = _check_class(request, db, user, class_id)
     try:
-        link = request.app.state.telegram_link_service.create_teacher_link(db, user, class_id)
+        links = request.app.state.telegram_link_service
+        link = (
+            links.create_coordinator_link(db, user, class_id)
+            if request.url.path.startswith("/coordinator/")
+            else links.create_teacher_link(db, user, class_id)
+        )
         db.commit()
     except ValidationError as exc:
         db.rollback()
@@ -338,6 +345,7 @@ def connect_teacher_telegram(
         link=link,
         class_id=class_id,
         classroom=classroom,
+        school=db.get(School, classroom.school_id),
         csrf_token=csrf(request),
     )
     response.headers["Cache-Control"] = "no-store"
@@ -376,7 +384,7 @@ def add_student(
         )
     return redirect_with_message(
         _class_url(request, class_id),
-        f"{student.name} is enrolled. You can generate their Telegram link below.",
+        f"{student.name} is enrolled.",
         anchor=f"student-{student.id}",
     )
 

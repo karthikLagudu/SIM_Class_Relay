@@ -57,6 +57,7 @@ def test_manual_draft_reviews_recipient_and_schedules_only_on_publish(client, ap
     assert "Instructions &amp; recipients" in draft.text
     assert data["student1"].name in draft.text and data["student2"].name not in draft.text
     assert "Publish assignment" in draft.text and "IST" in draft.text
+    assert "This demo simulates Telegram delivery." in draft.text
     assert (
         db.scalar(
             select(NotificationDelivery).where(NotificationDelivery.assignment_id == assignment.id)
@@ -68,11 +69,12 @@ def test_manual_draft_reviews_recipient_and_schedules_only_on_publish(client, ap
         f"/teacher/assignments/{assignment.id}/publish", data={"csrf_token": token}
     )
     assert published.status_code == 200
-    assert "Assignment published" in published.text
+    assert "Assignment published. This demo simulates Telegram delivery." in published.text
     assert "Simulated" in published.text
     assert db.scalar(
         select(NotificationDelivery).where(NotificationDelivery.assignment_id == assignment.id)
     )
+    assert "can send <code>/assignments</code>" in published.text
 
 
 def test_draft_can_be_retried_after_a_failed_write(client, app, db, data, monkeypatch):

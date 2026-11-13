@@ -29,6 +29,7 @@ def unlink(student) -> None:
 
 
 def link_service(app) -> TelegramLinkService:
+    app.state.settings.telegram_mode = "real"
     app.state.settings.telegram_bot_username = "classroom_companion_bot"
     return app.state.telegram_link_service
 
@@ -181,6 +182,9 @@ def test_web_link_and_disconnect_require_csrf_and_hide_bot_token(client, app, db
     response = client.post(path, data={"csrf_token": csrf})
     assert response.status_code == 200
     assert "https://t.me/classroom_companion_bot?start=" in response.text
+    assert "tg://resolve?domain=classroom_companion_bot&amp;start=" in response.text
+    assert "Send this one-time command in Telegram" in response.text
+    assert 'value="/start ' in response.text
     assert "never-show-this-bot-token" not in response.text
 
     disconnect_path = (
@@ -498,3 +502,18 @@ def test_failed_delivery_is_retried_with_mocked_telegram(app, db, data, monkeypa
     finally:
         telegram.settings.telegram_mode = old_mode
         telegram.settings.telegram_bot_token = old_token
+
+
+def test_offline_demo_cannot_generate_telegram_link(client, app, db, data):
+    unlink(data["student1"])
+    db.commit()
+    csrf = authenticate(client, app, data["teacher1"].id)
+    class_url = f"/teacher/classes/{data['class1'].id}"
+    page = client.get(class_url)
+    assert "Open the live Class Relay instance to link a Telegram account" in page.text
+    assert "Generate Telegram link" not in page.text
+    path = f"{class_url}/students/{data['student1'].id}/telegram-link"
+    response = client.post(path, data={"csrf_token": csrf})
+    assert response.status_code == 422
+    assert "Telegram linking is unavailable in the offline demo" in response.text
+    assert db.scalar(select(func.count()).select_from(TelegramLinkToken)) == 0

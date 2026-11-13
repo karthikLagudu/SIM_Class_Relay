@@ -11,7 +11,12 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.exceptions import AuthorizationError, NotFoundError, TelegramLinkError, ValidationError
 from app.models import ClassMembership, Classroom, SchoolMembership, TelegramLinkToken, User
-from app.services.authorization import require_managed_class, require_teacher_class
+from app.services.authorization import (
+    require_active_class,
+    require_coordinator_class,
+    require_managed_class,
+    require_teacher_class,
+)
 
 
 def aware_utc(value: datetime) -> datetime:
@@ -21,6 +26,9 @@ def aware_utc(value: datetime) -> datetime:
 @dataclass(frozen=True)
 class TelegramConnectionLink:
     url: str
+    app_url: str
+    bot_username: str
+    start_command: str
     expires_at: datetime
     token_id: int
 
@@ -53,17 +61,21 @@ class TelegramLinkService:
             raise AuthorizationError("Resource is outside your authorized scope")
         return classroom, student
 
-    def revoke_active_tokens(self, db: Session, user_id: int, now: datetime | None = None) -> int:
+    def revoke_active_tokens(
+        self, db: Session, user_id: int, now: datetime | None = None, *, student_school_id: int | None = None
+    ) -> int:
         current = aware_utc(now or datetime.now(UTC))
-        rows = list(
-            db.scalars(
-                select(TelegramLinkToken).where(
-                    TelegramLinkToken.user_id == user_id,
-                    TelegramLinkToken.used_at.is_(None),
-                    TelegramLinkToken.revoked_at.is_(None),
-                )
-            )
+        query = select(TelegramLinkToken).where(
+            TelegramLinkToken.user_id == user_id,
+            TelegramLinkToken.used_at.is_(None),
+            TelegramLinkToken.revoked_at.is_(None),
         )
+        if student_school_id is not None:
+            query = query.join(Classroom).where(
+                Classroom.school_id == student_school_id,
+                TelegramLinkToken.created_by_user_id != user_id,
+            )
+        rows = list(db.scalars(query))
         for row in rows:
             row.revoked_at = current
         return len(rows)
@@ -85,9 +97,21 @@ class TelegramLinkService:
         require_teacher_class(db, teacher, classroom_id)
         return self._create_link(db, teacher, teacher, classroom_id, None)
 
+    def create_coordinator_link(
+        self, db: Session, coordinator: User, classroom_id: int
+    ) -> TelegramConnectionLink:
+        require_active_class(require_coordinator_class(db, coordinator, classroom_id))
+        return self._create_link(db, coordinator, coordinator, classroom_id, None)
+
+    @property
+    def can_generate_links(self) -> bool:
+        return self.settings.telegram_mode == "real" and bool(self.settings.telegram_bot_username)
+
     def _create_link(
         self, db: Session, actor: User, student: User, classroom_id: int, now: datetime | None
     ) -> TelegramConnectionLink:
+        if self.settings.telegram_mode != "real":
+            raise ValidationError("Telegram linking is unavailable in the offline demo. Open the live Class Relay instance to connect an account.")
         if student.telegram_user_id or student.telegram_chat_id:
             raise ValidationError("Disconnect Telegram before generating a new connection link")
         username = (self.settings.telegram_bot_username or "").strip().lstrip("@")
@@ -109,6 +133,9 @@ class TelegramLinkService:
         db.flush()
         return TelegramConnectionLink(
             url=f"https://t.me/{username}?start={raw_token}",
+            app_url=f"tg://resolve?domain={username}&start={raw_token}",
+            bot_username=username,
+            start_command=f"/start {raw_token}",
             expires_at=expires_at,
             token_id=row.id,
         )
@@ -151,13 +178,13 @@ class TelegramLinkService:
         classroom = db.get(Classroom, token.classroom_id)
         if student and token.created_by_user_id == token.user_id:
             try:
-                require_teacher_class(db, student, token.classroom_id)
-            except (AuthorizationError, NotFoundError):
-                is_teacher_link = False
+                require_managed_class(db, student, token.classroom_id)
+            except (AuthorizationError, NotFoundError, ValidationError):
+                is_staff_link = False
             else:
-                is_teacher_link = True
+                is_staff_link = True
         else:
-            is_teacher_link = False
+            is_staff_link = False
         membership = db.scalar(
             select(ClassMembership.id).where(
                 ClassMembership.classroom_id == token.classroom_id,
@@ -180,10 +207,10 @@ class TelegramLinkService:
             not student
             or not classroom
             or classroom.archived_at
-            or not (is_teacher_link or (membership and school_membership))
+            or not (is_staff_link or (membership and school_membership))
         ):
             raise TelegramLinkError(
-                "This student can no longer use this connection link.", "invalid"
+                "This account can no longer use this connection link.", "invalid"
             )
         issuer = db.get(User, token.created_by_user_id)
         if not issuer:

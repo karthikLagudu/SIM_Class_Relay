@@ -12,6 +12,7 @@
   <div><p class="eyebrow">{{ school.name }}</p><h1>New assignment</h1><p>{{ classroom.name }} · {{ classroom.grade }} · Deadline in {{ school.timezone }}</p></div>
 </header>
 {% if workspace == 'teacher' %}{{ teacher_class_nav(classroom, 'assignments') }}{% endif %}
+{% if offline_demo %}<p class="mode-note">Offline demo. Students can see published assignments in Class Relay. This instance simulates Telegram notifications.</p>{% endif %}
 {% if not students %}
 <section class="card narrow-card">
   <h2>Add students first</h2><p>This class needs at least one enrolled student before you can save a draft.</p>

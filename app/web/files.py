@@ -71,19 +71,29 @@ def student_file(
 
 
 def _send_file(request: Request, submission: Submission, download: bool):
-    if not submission.stored_file_path:
+    return send_private_file(
+        request, submission.stored_file_path, submission.original_filename,
+        submission.mime_type, download,
+    )
+
+
+def send_private_file(
+    request: Request, stored_path: str | None, filename: str | None,
+    mime_type: str | None, download: bool,
+):
+    if not stored_path:
         raise HTTPException(404, "Submission file is unavailable")
     root = request.app.state.settings.upload_dir.resolve()
-    path = Path(submission.stored_file_path).resolve()
+    path = Path(stored_path).resolve()
     if root != path and root not in path.parents:
         raise HTTPException(404, "Submission file is unavailable")
     if not path.is_file():
         raise HTTPException(404, "Submission file is unavailable")
-    inline = submission.mime_type in INLINE_IMAGE_TYPES
+    inline = mime_type in INLINE_IMAGE_TYPES
     return FileResponse(
         path,
-        media_type=submission.mime_type if inline else "application/octet-stream",
-        filename=submission.original_filename or path.name,
+        media_type=mime_type if inline else "application/octet-stream",
+        filename=filename or path.name,
         content_disposition_type="inline" if inline and not download else "attachment",
         headers={
             "Cache-Control": "private, no-store",

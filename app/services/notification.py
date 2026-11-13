@@ -12,6 +12,8 @@ from app.models import (
     ClassMembership,
     Classroom,
     NotificationDelivery,
+    SchoolMembership,
+    Submission,
     User,
 )
 from app.telegram.client import TelegramClient
@@ -42,6 +44,32 @@ class NotificationService:
             )
         )
 
+    def assignment_message(self, assignment: Assignment, classroom: Classroom) -> str:
+        instructions = assignment.instructions
+        if len(instructions) > 1500:
+            instructions = instructions[:1500] + "… Open Class Relay for the full instructions."
+        return (
+            f"{assignment.title}\n"
+            f"{classroom.name} · Due {self.format_deadline(assignment.due_at, assignment.timezone)}"
+            f"\n\n{instructions}"
+        )
+
+    @staticmethod
+    def assignment_actions(assignment_id: int, status: str = "assigned") -> dict | None:
+        rows = []
+        if status == "assigned":
+            rows.append([{"text": "Mark as read", "callback_data": f"ack:{assignment_id}"}])
+        actions = []
+        if status not in {"submitted", "completed", "cancelled"}:
+            actions.append({"text": "Turn in work", "callback_data": f"submit:{assignment_id}"})
+        if status in {"assigned", "acknowledged", "in_progress", "blocked", "overdue"}:
+            actions.append({"text": "Ask for help", "callback_data": f"ask:{assignment_id}"})
+        if actions:
+            rows.append(actions)
+        if status in {"assigned", "acknowledged", "in_progress", "blocked", "overdue", "needs_revision"}:
+            rows.append([{"text": "Update progress", "callback_data": f"progress:{assignment_id}"}])
+        return {"inline_keyboard": rows} if rows else None
+
     def _send(
         self,
         db: Session,
@@ -51,29 +79,15 @@ class NotificationService:
         body: str,
         key: str,
         *,
-        buttons: bool = False,
+        reply_markup: dict | None = None,
     ) -> NotificationDelivery:
-        markup = None
-        if buttons:
-            markup = {
-                "inline_keyboard": [
-                    [
-                        {"text": "Acknowledge", "callback_data": f"ack:{assignment.id}"},
-                        {"text": "I'm blocked", "callback_data": f"blocked:{assignment.id}"},
-                    ],
-                    [
-                        {"text": "Submit", "callback_data": f"submit:{assignment.id}"},
-                        {"text": "Ask for help", "callback_data": f"help:{assignment.id}"},
-                    ],
-                ]
-            }
         return self.telegram.send(
             db,
             student,
             None,
             body,
             kind=kind,
-            reply_markup=markup,
+            reply_markup=reply_markup,
             school_id=assignment.school_id,
             classroom_id=assignment.classroom_id,
             assignment_id=assignment.id,
@@ -84,16 +98,7 @@ class NotificationService:
         self, db: Session, assignment: Assignment
     ) -> list[NotificationDelivery]:
         classroom = db.get(Classroom, assignment.classroom_id)
-        instructions = assignment.instructions
-        if len(instructions) > 1500:
-            instructions = instructions[:1500] + "… Open Class Relay for the full instructions."
-        body = (
-            "📚 New Homework Assigned\n\n"
-            f"Assignment:\n{assignment.title}\n\n"
-            f"📝 Instructions:\n{instructions}\n\n"
-            f"⏰ Due:\n{self.format_deadline(assignment.due_at, assignment.timezone)}\n\n"
-            f"Class:\n{classroom.name if classroom else f'Class {assignment.classroom_id}'}"
-        )
+        body = "📚 New Homework Assigned\n\n" + self.assignment_message(assignment, classroom)
         deliveries = []
         for student in self.students(db, assignment):
             deliveries.append(
@@ -104,7 +109,7 @@ class NotificationService:
                     "assignment_created",
                     body,
                     f"assignment-created:{assignment.id}:{student.id}",
-                    buttons=True,
+                    reply_markup=self.assignment_actions(assignment.id),
                 )
             )
         return deliveries
@@ -162,16 +167,62 @@ class NotificationService:
         ]
 
     def notify_feedback(
-        self, db: Session, assignment: Assignment, student: User, message: str, key: str
+        self, db: Session, assignment: Assignment, student: User, message: str, key: str,
+        *, complete: bool,
     ) -> NotificationDelivery:
+        outcome = "Marked complete" if complete else "Revision requested"
         return self._send(
             db,
             assignment,
             student,
             "feedback",
-            f"Teacher feedback for {assignment.title}:\n{message}",
+            f"{outcome} · {assignment.title}\n\n{message}",
             key,
+            reply_markup={
+                "inline_keyboard": [[{
+                    "text": "Open assignment", "callback_data": f"assignment:{assignment.id}",
+                }]]
+            },
         )
+
+    def notify_staff(
+        self, db: Session, assignment: Assignment, student: User, kind: str, event_id: int,
+    ) -> None:
+        teachers = select(ClassMembership.user_id).where(
+            ClassMembership.classroom_id == assignment.classroom_id, ClassMembership.role == "teacher"
+        )
+        coordinators = select(SchoolMembership.user_id).where(
+            SchoolMembership.school_id == assignment.school_id, SchoolMembership.role == "coordinator"
+        )
+        recipients = db.scalars(
+            select(User).where(
+                User.id.in_(teachers.union(coordinators)), User.id != student.id,
+                User.telegram_chat_id.is_not(None),
+            )
+        ).all()
+        classroom = db.get(Classroom, assignment.classroom_id)
+        if kind == "staff_submission":
+            label = f"Work turned in · {student.name}"
+            detail = f"Open the review queue in Class Relay to read submission #{event_id}."
+        else:
+            label = f"Help requested · {student.name}"
+            detail = "Open Class Relay to read the student's note."
+        for recipient in recipients:
+            self._send(
+                db, assignment, recipient, kind,
+                f"{label}\n{assignment.title} · {classroom.name}\n\n{detail}",
+                f"{kind}:{event_id}:{recipient.id}",
+            )
+
+    def notify_submission_receipt(
+        self, db: Session, assignment: Assignment, student: User, submission: Submission,
+    ) -> None:
+        if student.telegram_chat_id:
+            self._send(
+                db, assignment, student, "submission_receipt",
+                f"Work turned in · {assignment.title}\nYour submission #{submission.id} was received.",
+                f"submission-receipt:{submission.id}",
+            )
 
     def notify_reminder(
         self,

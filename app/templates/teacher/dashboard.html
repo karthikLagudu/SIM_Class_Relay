@@ -49,7 +49,7 @@
     <h2 id="attention-title">Needs attention</h2>
     <div class="list">
       {% for item in risks %}
-      <a href="/{{ workspace }}/classes/{{ item.classroom_id }}/assignments/{{ item.assignment_id }}#student-{{ item.student_id }}" class="list-row">
+      <a href="/{{ workspace }}/classes/{{ item.classroom_id }}/students/{{ item.student_id }}?assignment_id={{ item.assignment_id }}#assignment-{{ item.assignment_id }}" class="list-row">
         <div><strong>{{ item.student_name }}</strong><span>{{ item.assignment_title }} · {{ classroom_names[item.classroom_id] }}</span>
           <span>{{ item.reasons|join(' · ')|capitalize }}</span></div>
         <b class="badge {{ 'blocked' if item.risk_level in ('high', 'critical') else 'needs_revision' }}">{{ item.risk_level|capitalize }}</b>

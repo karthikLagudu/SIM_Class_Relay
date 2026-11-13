@@ -2,6 +2,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.database import create_database_engine, get_db
@@ -10,6 +11,8 @@ from app.demo import (
     FULL_DEMO_PASSWORD,
     QUICK_DEMO_ACCOUNTS,
     QUICK_DEMO_ASSIGNMENT_KEY,
+    QUICK_DEMO_CHAT_IDS,
+    clear_demo_chat_placeholders,
 )
 from app.models import IdempotencyKey, User
 from scripts.seed_full_demo import seed_full_demo
@@ -163,6 +166,19 @@ def test_login_groups_all_seeded_accounts_and_gates_the_picker(client, app, monk
             ("Willowbend Academy", ["Grade 8A Science", "Grade 8B Science"])
         ]
 
+        with monkeypatch.context() as live:
+            live.setattr(app.state.settings, "telegram_mode", "real")
+            local = TestClient(app, base_url="http://127.0.0.1:8767", client=("127.0.0.1", 50000))
+            public = TestClient(app, base_url="https://classroom.example", client=("127.0.0.1", 50000))
+            remote = TestClient(app, base_url="http://localhost:8767", client=("192.0.2.1", 50000))
+            response = local.get("/login")
+            assert "Show demo accounts" in response.text
+            assert "Connect a Telegram account to receive live notifications." in response.text
+            for nonlocal_client in (public, remote):
+                response = nonlocal_client.get("/login")
+                assert "Show demo accounts" not in response.text
+                assert FULL_DEMO_PASSWORD not in response.text
+
         for setting, value in (
             ("demo_mode", False),
             ("telegram_mode", "real"),
@@ -200,3 +216,16 @@ def test_login_supports_quick_demo_definitions_and_requires_a_seed(
     for key in ("teacher", "outsider", "student2"):
         assert f'data-demo-email="{QUICK_DEMO_ACCOUNTS[key].email}"' in page.text
     assert QUICK_DEMO_ACCOUNTS["student1"].email not in page.text
+
+
+def test_clear_seeded_chat_placeholders_preserves_real_links(db, data):
+    placeholder, linked = data["teacher1"], data["student1"]
+    placeholder.email = QUICK_DEMO_ACCOUNTS["teacher"].email
+    placeholder.telegram_user_id = placeholder.telegram_chat_id = QUICK_DEMO_CHAT_IDS["teacher"]
+    linked.email = QUICK_DEMO_ACCOUNTS["student1"].email
+    db.commit()
+    assert clear_demo_chat_placeholders(db) == 1
+    db.commit()
+    assert placeholder.telegram_user_id is None and placeholder.telegram_chat_id is None
+    assert linked.telegram_user_id == linked.telegram_chat_id == "201"
+    assert clear_demo_chat_placeholders(db) == 0

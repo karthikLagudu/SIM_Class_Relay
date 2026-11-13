@@ -1,10 +1,18 @@
 {% extends "base.html" %}
+{% from "components.html" import telegram_manual_link %}
 {% block content %}
-<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/teacher">Your classes</a><span aria-hidden="true">/</span><a href="/teacher/classes/{{ class_id }}">{{ classroom.name }}</a></nav>
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  {% if workspace == 'coordinator' %}<a href="/coordinator?school_id={{ school.id }}">{{ school.name }}</a>
+  {% else %}<a href="/teacher">Your classes</a><span aria-hidden="true">/</span><a href="/teacher/classes/{{ class_id }}">{{ classroom.name }}</a>{% endif %}
+</nav>
 <section class="card">
   <p class="eyebrow">{{ classroom.name }} · {{ classroom.grade }}</p>
   <h1>Connect your Telegram account</h1>
   <p>Open the link in your own Telegram account and press Start. It expires at {{ link.expires_at.strftime('%H:%M UTC') }}.</p>
-  <a class="button" href="{{ link.url }}" rel="noreferrer">Open Telegram</a>
+  <div class="actions">
+    <a class="primary button-link" href="{{ link.app_url }}" rel="noreferrer">Open in Telegram</a>
+    <a class="ghost-button button-link" href="{{ link.url }}" rel="noreferrer">Open via t.me</a>
+  </div>
+  {{ telegram_manual_link(link) }}
 </section>
 {% endblock %}

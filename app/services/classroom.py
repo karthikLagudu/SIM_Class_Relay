@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.auth.security import hash_password
@@ -14,7 +15,9 @@ from app.models import (
     Assignment,
     ClassMembership,
     Classroom,
+    ConversationContext,
     Invite,
+    NotificationDelivery,
     Reminder,
     School,
     SchoolMembership,
@@ -27,10 +30,181 @@ from app.services.authorization import (
     require_coordinator_class,
     require_coordinator_school,
     require_managed_class,
+    workspace_roles,
 )
+from app.services.delivery import STAFF_ALERTS
+from app.services.telegram_link import TelegramLinkService
+
+
+@dataclass
+class StudentSchoolRemoval:
+    student: User
+    membership: SchoolMembership | None
+    enrollments: list[tuple[ClassMembership, Classroom]]
+    last_removal: int | None
+
+    @property
+    def present(self) -> bool:
+        return self.membership is not None or bool(self.enrollments)
+
+    def snapshot(self) -> dict:
+        return {
+            "membership": self.membership.id if self.membership else None,
+            "enrollments": [
+                [member.id, classroom.id, aware_utc(member.created_at).isoformat()]
+                for member, classroom in self.enrollments
+            ],
+            "last_removal": self.last_removal,
+        }
 
 
 class ClassroomService:
+    @staticmethod
+    def student_school_removal(
+        db: Session, actor: User, school_id: int, student_id: int
+    ) -> StudentSchoolRemoval:
+        require_coordinator_school(db, actor, school_id)
+        membership = db.scalar(
+            select(SchoolMembership).where(
+                SchoolMembership.school_id == school_id,
+                SchoolMembership.user_id == student_id,
+                SchoolMembership.role == "student",
+            )
+        )
+        enrollments = [
+            (member, classroom)
+            for member, classroom in db.execute(
+                select(ClassMembership, Classroom)
+                .join(Classroom)
+                .where(
+                    Classroom.school_id == school_id,
+                    ClassMembership.user_id == student_id,
+                    ClassMembership.role == "student",
+                )
+                .order_by(Classroom.name, Classroom.id)
+            )
+        ]
+        last_removal = db.scalar(
+            select(ActivityEvent.id)
+            .where(
+                ActivityEvent.school_id == school_id,
+                ActivityEvent.event_type == "student_removed_from_school",
+                ActivityEvent.entity_type == "user",
+                ActivityEvent.entity_id == student_id,
+            )
+            .order_by(ActivityEvent.id.desc())
+            .limit(1)
+        )
+        student = db.get(User, student_id)
+        if not student or not (membership or enrollments or last_removal):
+            raise AuthorizationError("Resource is outside your authorized scope")
+        return StudentSchoolRemoval(student, membership, enrollments, last_removal)
+
+    def remove_student_from_school(
+        self,
+        db: Session,
+        actor: User,
+        school_id: int,
+        student_id: int,
+        expected: dict,
+        links: TelegramLinkService,
+    ) -> str:
+        plan = self.student_school_removal(db, actor, school_id, student_id)
+        if not plan.present:
+            return f"{plan.student.name} was already removed from this school."
+        if plan.snapshot() != expected:
+            raise ValidationError("The student’s enrollments changed. Review the removal again.")
+        now = datetime.now(UTC)
+        if plan.membership:
+            db.delete(plan.membership)
+        for enrollment, _ in plan.enrollments:
+            db.delete(enrollment)
+        db.flush()
+        remaining_access = bool(workspace_roles(db, plan.student))
+        links.revoke_active_tokens(
+            db, student_id, now, student_school_id=school_id if remaining_access else None
+        )
+        if not remaining_access:
+            plan.student.telegram_user_id = None
+            plan.student.telegram_chat_id = None
+
+        assignments = select(Assignment.id).where(Assignment.school_id == school_id)
+        classes = select(Classroom.id).where(Classroom.school_id == school_id)
+        reason = "Student left the school"
+        db.execute(
+            update(Reminder)
+            .where(
+                Reminder.student_id == student_id,
+                Reminder.assignment_id.in_(assignments),
+                or_(
+                    Reminder.status.in_(("pending", "deferred")),
+                    (Reminder.status == "failed")
+                    & Reminder.dedupe_key.in_(
+                        select(Reminder.dedupe_key)
+                        .join(
+                            NotificationDelivery,
+                            NotificationDelivery.idempotency_key
+                            == ("reminder:" + Reminder.dedupe_key),
+                        )
+                        .where(NotificationDelivery.next_attempt_at.is_not(None))
+                    ),
+                ),
+            )
+            .values(status="cancelled", reason=reason, processed_at=now)
+        )
+        deliveries = update(NotificationDelivery).where(
+            NotificationDelivery.user_id == student_id,
+            NotificationDelivery.status.in_(("pending", "failed")),
+            or_(
+                NotificationDelivery.status == "pending",
+                NotificationDelivery.next_attempt_at.is_not(None),
+            ),
+        )
+        if remaining_access:
+            scoped = or_(
+                NotificationDelivery.school_id == school_id,
+                NotificationDelivery.classroom_id.in_(classes),
+                NotificationDelivery.assignment_id.in_(assignments),
+            )
+            # Old student summaries can contain several schools and have no single scope.
+            summaries = (
+                NotificationDelivery.assignment_id.is_(None)
+                & NotificationDelivery.school_id.is_(None)
+                & NotificationDelivery.classroom_id.is_(None)
+                & NotificationDelivery.kind.in_(
+                    ("status", "help", "telegram_connected", "student_summary")
+                )
+            )
+            deliveries = deliveries.where(
+                or_(
+                    scoped
+                    & NotificationDelivery.kind.not_in(STAFF_ALERTS | {"teacher_confirmation"}),
+                    summaries,
+                )
+            )
+        db.execute(deliveries.values(status="skipped", error=reason, next_attempt_at=None))
+        if not remaining_access:
+            db.execute(delete(ConversationContext).where(ConversationContext.user_id == student_id))
+        db.add(
+            ActivityEvent(
+                school_id=school_id,
+                actor_user_id=actor.id,
+                event_type="student_removed_from_school",
+                entity_type="user",
+                entity_id=student_id,
+                created_at=now,
+                metadata_json={
+                    "school_membership_id": plan.membership.id if plan.membership else None,
+                    "classroom_ids": [classroom.id for _, classroom in plan.enrollments],
+                    "class_names": [classroom.name for _, classroom in plan.enrollments],
+                    "removed_membership_ids": [member.id for member, _ in plan.enrollments],
+                },
+            )
+        )
+        return (
+            f"{plan.student.name} was removed from this school. Their assignment history was kept."
+        )
+
     def edit_school(
         self, db: Session, actor: User, school_id: int, name: str, timezone: str
     ) -> School:

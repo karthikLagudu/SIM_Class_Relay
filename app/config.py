@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     speech_mode: Literal["off", "openai"] = "off"
     openai_transcription_model: str = "gpt-transcribe"
     telegram_mode: str = "log"
+    telegram_updates: Literal["webhook", "polling"] = "webhook"
     telegram_bot_token: str | None = None
     telegram_bot_username: str | None = None
     telegram_webhook_secret: str = "change-me"

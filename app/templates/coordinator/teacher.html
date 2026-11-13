@@ -14,7 +14,7 @@
   <div class="section-head"><h2 id="teacher-class-{{ item.classroom.id }}">{{ item.classroom.name }}</h2>{% if item.teachers|length > 1 %}<span class="badge">Co-taught · shared workload</span>{% endif %}</div>
   <p>{{ item.classroom.grade }} · {{ item.students|length }} students · {{ item.reviews|length }} awaiting review · {{ item.risks|map(attribute='student_id')|unique|list|length }} need attention</p>
   <div class="actions"><a class="ghost-button button-link" href="/coordinator/submissions?school_id={{ school.id }}&amp;class_id={{ item.classroom.id }}&amp;status=awaiting">Review queue</a><a class="ghost-button button-link" href="/coordinator/classes/{{ item.classroom.id }}#students">Manage roster</a></div>
-  <details class="disclosure-inline"><summary>Student roster</summary><ul>{% for student in item.students %}<li>{{ student.name }}</li>{% else %}<li>No enrolled students</li>{% endfor %}</ul></details>
+  <details class="disclosure-inline"><summary>Student roster</summary><ul>{% for student in item.students %}<li><a href="/coordinator/classes/{{ item.classroom.id }}/students/{{ student.id }}">{{ student.name }}</a></li>{% else %}<li>No enrolled students</li>{% endfor %}</ul></details>
   <details class="disclosure-inline"><summary>Assignments</summary>
     <div class="list">{% for assignment in item.assignments %}<a class="list-row" href="{{ assignment|assignment_path('coordinator') }}"><div><strong>{{ assignment.title }}</strong><span>{{ 'Created by ' ~ row.teacher.name if assignment.created_by_user_id == row.teacher.id else 'Created by another staff member' }}</span></div>{{ assignment_badge(assignment.status) }}</a>{% else %}<p>No assignments yet.</p>{% endfor %}</div>
   </details>

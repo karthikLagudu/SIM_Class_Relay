@@ -1,9 +1,16 @@
 from dataclasses import dataclass
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models import User
+
 FULL_DEMO_PASSWORD = "ClassRelayDemo!42"
 FULL_DEMO_SEED_KEY = "full-demo:dataset"
 FULL_DEMO_SEED_OPERATION = "seed_full_demo"
 QUICK_DEMO_ASSIGNMENT_KEY = "seed:assignment:1"
+QUICK_DEMO_CHAT_IDS = {"teacher": "900001", "student1": "900101"}
+FULL_DEMO_FIRST_CHAT_ID = 980_000_001
 
 
 @dataclass(frozen=True)
@@ -144,3 +151,23 @@ def full_demo_accounts() -> tuple[FullDemoAccount, ...]:
 
 
 FULL_DEMO_ACCOUNTS = full_demo_accounts()
+
+DEMO_CHAT_PLACEHOLDERS = {
+    **{QUICK_DEMO_ACCOUNTS[key].email: chat_id for key, chat_id in QUICK_DEMO_CHAT_IDS.items()},
+    **{
+        account.email: str(FULL_DEMO_FIRST_CHAT_ID + index)
+        for index, account in enumerate(FULL_DEMO_ACCOUNTS)
+        if account.linked
+    },
+}
+
+
+def clear_demo_chat_placeholders(db: Session) -> int:
+    """Prepare a seeded database for real Telegram connections."""
+    users = db.scalars(select(User).where(User.email.in_(DEMO_CHAT_PLACEHOLDERS))).all()
+    count = 0
+    for user in users:
+        if user.telegram_user_id == user.telegram_chat_id == DEMO_CHAT_PLACEHOLDERS[user.email]:
+            user.telegram_user_id = user.telegram_chat_id = None
+            count += 1
+    return count

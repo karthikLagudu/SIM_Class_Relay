@@ -38,6 +38,7 @@ from app.services.progress import ProgressService
 from app.services.state_machine import TRANSITIONS
 from app.services.submission import SubmissionService
 from app.services.submission_history import feedback_outcomes
+from app.web.files import INLINE_IMAGE_TYPES
 from app.web.helpers import (
     assignment_path,
     csrf,
@@ -46,6 +47,7 @@ from app.web.helpers import (
     render,
     web_user,
 )
+from app.web.student_support import support_replies
 
 router = APIRouter()
 
@@ -224,6 +226,8 @@ def _render_assignment(
         reminders=reminders,
         submissions=submissions,
         feedback=feedback,
+        help_replies=support_replies(db, [assignment.id], user.id),
+        support_image_types=INLINE_IMAGE_TYPES,
         feedback_outcomes=feedback_outcomes(db, assignment, [item.id for item in feedback]),
         feedback_authors=dict(
             db.execute(
@@ -274,7 +278,7 @@ def student_progress(
             percent = int(progress_percent)
         if status == "in_progress" and not message.strip() and percent is None:
             raise ValidationError("Enter an update or add a percentage.")
-        ProgressService().update(
+        ProgressService(request.app.state.notification_service).update(
             db, user, assignment_id, status, message.strip() or "Progress updated", percent
         )
         db.commit()
@@ -350,7 +354,7 @@ async def student_submit(
         return retry("Write a response or attach a file.")
     keep_file = False
     try:
-        submission = SubmissionService().submit(
+        submission = SubmissionService(request.app.state.notification_service).submit(
             db,
             user,
             assignment_id,
@@ -360,6 +364,7 @@ async def student_submit(
             original_filename=original_name,
             mime_type=mime_type,
             content=content,
+            web_receipt=True,
         )
         db.commit()
         keep_file = submission.stored_file_path == stored_path

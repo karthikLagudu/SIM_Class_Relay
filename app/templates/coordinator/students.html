@@ -20,7 +20,7 @@
     {% set available = classes|rejectattr('id', 'in', enrolled_ids)|list %}
     <tr role="row" id="student-{{ student.id }}">
       <th role="rowheader" scope="row"><span class="roster-name">{{ student.name }}</span><span class="roster-secondary">{{ student.email }}</span></th>
-      <td role="cell"><span class="cell-label">Enrolled classes</span><ul class="roster-classes">{% for classroom in enrolled %}<li><a href="/coordinator/classes/{{ classroom.id }}#student-{{ student.id }}">{{ classroom.name }}</a></li>{% else %}<li>Unassigned</li>{% endfor %}</ul></td>
+      <td role="cell"><span class="cell-label">Enrolled classes</span><ul class="roster-classes">{% for classroom in enrolled %}<li><a href="/coordinator/classes/{{ classroom.id }}/students/{{ student.id }}">{{ classroom.name }}</a></li>{% else %}<li>Unassigned</li>{% endfor %}</ul></td>
       <td role="cell"><span class="cell-label">Telegram</span><span class="badge {{ 'sent' if student.telegram_user_id else 'skipped' }}">{{ 'Telegram linked' if student.telegram_user_id else 'Telegram not linked' }}</span></td>
       <td role="cell"><span class="cell-label">Enrollment</span>
       {% if available %}<details class="disclosure-inline"><summary>Enroll in another class</summary>
@@ -30,6 +30,7 @@
           <div class="actions"><button class="ghost-button">Enroll student</button></div>
         </form>
       </details>{% else %}<span class="roster-secondary">No additional classes available</span>{% endif %}
+      <a class="roster-action" href="/coordinator/schools/{{ school.id }}/students/{{ student.id }}/remove" aria-label="Remove from school: {{ student.name }}">Remove from school</a>
       </td>
     </tr>
   {% endfor %}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from urllib.parse import urlencode
@@ -20,8 +21,13 @@ from app.services.authorization import (
     require_coordinator_school,
     workspace_roles,
 )
+from app.web.live import workspace_version
 
 WORKSPACES = {"coordinator": "Coordinator", "teacher": "Teacher", "student": "Student"}
+LIVE_PAGE = re.compile(
+    r"/(?:student|teacher|coordinator)"
+    r"(?:/submissions(?:/\d+)?|/classes/\d+/(?:work|students/\d+)|(?:/classes/\d+)?/assignments/\d+)?"
+)
 
 
 def render(request: Request, template: str, *, status_code: int = 200, **context):
@@ -37,6 +43,7 @@ def render(request: Request, template: str, *, status_code: int = 200, **context
         status_code=status_code,
         context={
             "offline_demo": request.app.state.settings.telegram_mode == "log",
+            "live_version": getattr(request.state, "live_version", None) if status_code == 200 else None,
             "workspaces": workspaces,
             "workspace": role,
             "managed_schools": getattr(request.state, "managed_schools", ()),
@@ -55,6 +62,12 @@ def web_user(request: Request, db: Session = Depends(get_db)) -> User:
     if not request.url.path.startswith("/api/"):
         request.state.workspace_user = user
         request.state.workspace_roles = workspace_roles(db, user)
+        workspace = request.url.path.split("/", 2)[1]
+        if (
+            request.method == "GET" and workspace in request.state.workspace_roles
+            and LIVE_PAGE.fullmatch(request.url.path)
+        ):
+            request.state.live_version = workspace_version(db, user, workspace)
         if (
             request.url.path.split("/", 2)[1] == "coordinator"
             and "coordinator" in request.state.workspace_roles

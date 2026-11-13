@@ -15,7 +15,7 @@
 <header class="hero compact-hero workspace-hero">
   <div><p class="eyebrow">{{ school.name }} · {{ classroom.name }}</p>
     <h1>{{ selected.student_name }}’s submission</h1>
-    <p>{{ assignment.title }} · {{ classroom.grade }}</p>
+    <p><a href="/{{ workspace }}/classes/{{ classroom.id }}/students/{{ submission.student_id }}?assignment_id={{ assignment.id }}#assignment-{{ assignment.id }}">Open student record</a> · {{ assignment.title }} · {{ classroom.grade }}</p>
     <p>Attempt {{ attempt_number }} · Submitted {{ submission.created_at|local_deadline(assignment.timezone) }}</p>
   </div>
   <div class="actions">{{ review_badge(selected.review_status) }}<span class="badge">{{ 'Latest attempt' if selected.latest else 'Earlier attempt' }}</span></div>

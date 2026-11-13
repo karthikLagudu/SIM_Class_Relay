@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% from "components.html" import support_reply %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <a href="/{{ workspace }}/classes/{{ classroom.id }}#student-{{ student.id }}">{{ classroom.name }} roster</a>
+</nav>
+<header class="hero compact-hero workspace-hero">
+  <div><p class="eyebrow">{{ school.name }} · {{ classroom.name }}</p><h1>{{ student.name }}</h1><p>{{ student.email }}</p></div>
+  {% if not enrolled %}<span class="badge skipped">Former enrollment</span>{% endif %}
+</header>
+{% if workspace == "coordinator" %}<p class="notice">You can see the student’s help requests and teacher replies for this class.</p>{% endif %}
+{% for assignment, state in rows %}
+{% set focused = assignment.id == focus_id %}
+<section class="card stack" id="assignment-{{ assignment.id }}" aria-labelledby="assignment-title-{{ assignment.id }}">
+  <div class="section-head">
+    <div>
+      <h2 id="assignment-title-{{ assignment.id }}"><a href="{{ assignment|assignment_path(workspace) }}#student-{{ student.id }}">{{ assignment.title }}</a></h2>
+      <p class="muted">Due {{ assignment.due_at|local_deadline(assignment.timezone) }}</p>
+    </div>
+    <span class="badge {{ state.status }}">{{ state.status|student_status }}</span>
+  </div>
+  {% if latest_submissions.get(assignment.id) %}<a href="/{{ workspace }}/submissions/{{ latest_submissions[assignment.id] }}">Open latest submission and feedback</a>{% endif %}
+  {% if requests[assignment.id] or state.block_reason %}
+  <div class="section-divider">
+    <h3>Help requested</h3>
+    {% for event in requests[assignment.id][:1] %}
+    <p class="tiny">{{ event.created_at|local_deadline(assignment.timezone) }}</p>
+    <p class="preserve-lines">{{ event.message }}</p>
+    {% else %}<p class="preserve-lines">{{ state.block_reason }}</p>{% endfor %}
+    {% if requests[assignment.id]|length > 1 %}
+    <details class="disclosure-inline"><summary>Earlier help requests</summary>
+      {% for event in requests[assignment.id][1:] %}
+      <p class="tiny">{{ event.created_at|local_deadline(assignment.timezone) }}</p><p class="preserve-lines">{{ event.message }}</p>
+      {% endfor %}
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if replies[assignment.id] %}
+  <div class="section-divider">
+    <h3>Teacher replies</h3>
+    {% for reply, author in replies[assignment.id] %}{{ support_reply(reply, author, workspace, assignment.timezone, inline_image_types) }}{% endfor %}
+  </div>
+  {% endif %}
+  {% if can_reply and assignment.status == "assigned" %}
+  <details class="disclosure-inline section-divider" {% if focused or state.status == "blocked" and not replies[assignment.id] %}open{% endif %}>
+    <summary>Send help</summary>
+    <form class="stack" method="post" enctype="multipart/form-data" action="/teacher/classes/{{ classroom.id }}/students/{{ student.id }}/assignments/{{ assignment.id }}/support#assignment-{{ assignment.id }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="idempotency_key" value="{{ reply_keys[assignment.id] }}">
+      {% if focused and error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+      <label>Message for {{ student.name }}<textarea name="message" rows="3" maxlength="5000">{{ draft_message if focused else '' }}</textarea></label>
+      <label>Image or file<input type="file" name="file" aria-describedby="support-hint-{{ assignment.id }}"></label>
+      <p class="field-hint" id="support-hint-{{ assignment.id }}">Add a message, one file up to {{ max_upload_mb }} MB, or both. The student and authorized school staff can see your reply.</p>
+      <div class="actions"><button class="primary">Send help to student</button></div>
+    </form>
+  </details>
+  {% endif %}
+</section>
+{% else %}
+<section class="card"><p class="empty">This student has no assignment history in this class yet.</p></section>
+{% endfor %}
+{% endblock %}

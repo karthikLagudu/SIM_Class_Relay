@@ -6,6 +6,7 @@
       <strong>{{ item.label }}{% if item.subject %} · {{ item.subject }}{% endif %}</strong>
       <span>{{ item.actor or 'System' }}{% if item.class_name %} · {{ item.class_name }}{% endif %} · {{ item.event.created_at|local_deadline(school.timezone) }}</span>
       {% if item.event.event_type == 'teaching_team_changed' %}<span>{{ item.before|join(', ') or 'Unassigned' }} → {{ item.after|join(', ') or 'Unassigned' }}</span>{% endif %}
+      {% if item.event.event_type == 'student_removed_from_school' %}<span>{{ item.event.metadata_json.class_names|join(', ') or 'No class enrollments' }}</span>{% endif %}
     </div></div>
   {% else %}<p class="empty">Changes to class management and access will appear here.</p>{% endfor %}
   </div>

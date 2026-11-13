@@ -96,6 +96,12 @@ def _workspace(request: Request) -> str:
     return "coordinator" if request.url.path.startswith("/coordinator/") else "teacher"
 
 
+def _published_message(request: Request) -> str:
+    if request.app.state.settings.telegram_mode == "log":
+        return "Assignment published. This demo simulates Telegram delivery."
+    return "Assignment published. Check Notifications for Telegram delivery."
+
+
 def _staff_class(request: Request, db: Session, user: User, class_id: int):
     require = (
         require_coordinator_class if _workspace(request) == "coordinator" else require_teacher_class
@@ -478,7 +484,7 @@ def create_assignment(
     message = (
         "Draft saved. Review the recipients, instructions, and deadline before publishing."
         if assignment.status == "draft"
-        else "Assignment published. Check Notifications for delivery updates."
+        else _published_message(request)
     )
     return redirect_with_message(assignment_path(assignment, _workspace(request)), message)
 
@@ -508,7 +514,7 @@ def publish_assignment(
         return _render_assignment(request, user, db, assignment_id, errors={"publish": error})
     return redirect_with_message(
         assignment_path(assignment, _workspace(request)),
-        "Assignment published. Students can open it now. Check Notifications for Telegram delivery.",
+        _published_message(request),
     )
 
 

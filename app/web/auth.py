@@ -45,7 +45,7 @@ def render_login(request: Request, db: Session, **context):
     response = render(
         request,
         "login.html",
-        demo_groups=demo_account_groups(request.app.state.settings, db),
+        demo_groups=demo_account_groups(request.app.state.settings, db, request),
         **context,
     )
     response.headers["Cache-Control"] = "no-store"
@@ -66,6 +66,14 @@ def login(
             db,
             status_code=401,
             error="Check your email and password and try again.",
+            email=email,
+        )
+    if not workspace_roles(db, user):
+        return render_login(
+            request,
+            db,
+            status_code=403,
+            error="This account has no workspace access. Ask your school coordinator for help.",
             email=email,
         )
     token, _ = request.app.state.sessions.create(user.id)

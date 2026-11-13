@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import User
+from app.services.authorization import workspace_roles
 
 PBKDF2_ITERATIONS = 600_000
 
@@ -78,7 +79,7 @@ def current_session(request: Request) -> SessionData:
 def current_user(request: Request, db: Session) -> User:
     data = current_session(request)
     user = db.get(User, data.user_id)
-    if not user:
+    if not user or not workspace_roles(db, user):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
         )

@@ -205,6 +205,7 @@ def _render_school(request, user, db, school_id=None, *, errors=None, form=None)
         query=query,
         filter_by=filter_by,
         active_classes=[item for item in classes if not item.archived_at],
+        can_link=request.app.state.telegram_link_service.can_generate_links,
         activity=school_activity(db, school.id),
         csrf_token=csrf(request),
         message=request.query_params.get("message"),
@@ -355,6 +356,69 @@ def enroll_student(
         f"{student.name} is enrolled in {classroom.name}.",
         anchor=f"student-{student.id}",
     )
+
+
+def _student_removal_token(request: Request) -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(
+        request.app.state.settings.session_secret, salt="coordinator-student-school-removal-v1"
+    )
+
+
+@router.get(
+    "/coordinator/schools/{school_id}/students/{student_id}/remove", response_class=HTMLResponse
+)
+def preview_student_school_removal(
+    request: Request,
+    school_id: int,
+    student_id: int,
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    school = coordinator_school(request, db, user, school_id)
+    plan = ClassroomService().student_school_removal(db, user, school_id, student_id)
+    directory_url = f"/coordinator/schools/{school_id}/students"
+    if not plan.present:
+        return redirect_with_message(directory_url, "This student was already removed from this school.")
+    token = _student_removal_token(request).dumps(
+        {"actor": user.id, "school": school_id, "student": student_id, "snapshot": plan.snapshot()}
+    )
+    return render(
+        request,
+        "coordinator/remove_student.html",
+        school=school,
+        student=plan.student,
+        classes=[classroom for _, classroom in plan.enrollments],
+        token=token,
+        directory_url=directory_url,
+    )
+
+
+@router.post("/coordinator/schools/{school_id}/students/{student_id}/remove")
+def confirm_student_school_removal(
+    request: Request,
+    school_id: int,
+    student_id: int,
+    csrf_token: str = Form(),
+    removal_token: str = Form(),
+    confirmed: bool = Form(default=False),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    coordinator_school(request, db, user, school_id)
+    if not confirmed:
+        raise ValidationError("Confirm the removal by checking the box on the review page.")
+    try:
+        plan = _student_removal_token(request).loads(removal_token, max_age=15 * 60)
+    except BadSignature as exc:
+        raise ValidationError("This confirmation expired or is invalid. Open the student directory and review the removal again.") from exc
+    if (plan["actor"], plan["school"], plan["student"]) != (user.id, school_id, student_id):
+        raise AuthorizationError("Resource is outside your authorized scope")
+    message = ClassroomService().remove_student_from_school(
+        db, user, school_id, student_id, plan["snapshot"], request.app.state.telegram_link_service
+    )
+    db.commit()
+    return redirect_with_message(f"/coordinator/schools/{school_id}/students", message)
 
 
 @router.post("/coordinator/classes")

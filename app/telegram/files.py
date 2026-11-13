@@ -53,9 +53,10 @@ class StoredTelegramFile:
 
 
 class TelegramFileService:
-    def __init__(self, settings: Settings, client: TelegramClient):
+    def __init__(self, settings: Settings, client: TelegramClient, submissions: SubmissionService):
         self.settings = settings
         self.client = client
+        self.submissions = submissions
 
     def download(
         self, file_id: str, original_filename: str | None, mime_type: str | None
@@ -101,7 +102,7 @@ class TelegramFileService:
             raise ValidationError("The attachment exceeds the upload size limit")
         stored = self.download(attachment.file_id, attachment.filename, attachment.mime_type)
         try:
-            return SubmissionService().submit(
+            return self.submissions.submit(
                 db,
                 user,
                 assignment_id,

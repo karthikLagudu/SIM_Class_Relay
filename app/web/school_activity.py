@@ -15,6 +15,7 @@ MANAGEMENT_EVENTS = {
     "student_enrolled": "Student enrolled",
     "student_transferred": "Student transferred",
     "student_removed": "Student removed from class",
+    "student_removed_from_school": "Student removed from school",
 }
 
 
