@@ -5,8 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "classroom-companion"
 version = "1.0.0"
-description = "Telegram-first classroom assignment coordination"
+description = "Class Relay by Super Intelli Machines connects classroom work and feedback across web and Telegram."
+readme = "README.md"
 requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Education",
+]
 dependencies = [
   "fastapi>=0.116,<1",
   "uvicorn[standard]>=0.35,<1",
@@ -20,6 +27,10 @@ dependencies = [
   "python-dateutil>=2.9,<3",
   "tzdata>=2025.2",
 ]
+
+[project.urls]
+Repository = "https://github.com/karthikLagudu/SIM_Class_Relay"
+"Demo guide" = "https://github.com/karthikLagudu/SIM_Class_Relay/blob/main/DEMO.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.4,<9", "pytest-cov>=6.2,<7", "ruff>=0.12,<1"]
