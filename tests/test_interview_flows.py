@@ -22,6 +22,7 @@ from app.services.assignment import AssignmentService, get_student_state
 from app.services.risk import RiskService
 from app.telegram.service import TelegramService
 from tests.conftest import authenticate
+from tests.test_telegram import latest_delivery, tap
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/9r0AAAAASUVORK5CYII="
@@ -65,6 +66,10 @@ def test_attachment_waits_for_authorized_choice_across_restart(
         original = update(4001, 201, photo=[{"file_id": "photo-a"}])
         assert app.state.telegram_service.process(db, original)["result"] == "file_needs_context"
         assert app.state.telegram_service.process(db, original)["duplicate"]
+        prompt = latest_delivery(db)
+        button = prompt.reply_markup["inline_keyboard"][0][0]
+        assert button["text"] == "Essay · Class One"
+        assert "Tap the assignment" in prompt.body and "#ID" not in prompt.body
         assert not requested
         db.commit()
         with app.state.session_factory.begin() as resumed:
@@ -75,9 +80,12 @@ def test_attachment_waits_for_authorized_choice_across_restart(
             )
             assert not requested
             expected = data["assignment"].id
-            result = service.process(resumed, update(4003, 201, f"#{expected}"))
+            result = service.process(resumed, tap(4003, 201, button["callback_data"]))
             assert result["result"].startswith("submission:")
             assert len(requested) == 2
+            assert service.process(resumed, tap(4004, 201, button["callback_data"]))["result"] == (
+                "error:NotFoundError"
+            )
         submission = db.scalar(select(Submission))
         assert submission.assignment_id == expected
         assert submission.content_hash == hashlib.sha256(PNG).hexdigest()
@@ -91,6 +99,31 @@ def test_attachment_waits_for_authorized_choice_across_restart(
         assert client.get(file_url).content == PNG
         authenticate(client, app, data["student2"].id)
         assert client.get(file_url).status_code == 403
+
+
+def test_album_sends_one_receipt_without_asking_about_later_photos(app, db, data, monkeypatch, tmp_path):
+    service = app.state.telegram_service
+    assignment = data["assignment"]
+    monkeypatch.setattr(app.state.settings, "upload_dir", tmp_path)
+    monkeypatch.setattr(service.client, "download_file", lambda *_args: PNG)
+    service.process(db, tap(4100, 201, f"submit:{assignment.id}"))
+    assert "for Essay" in latest_delivery(db).body
+    first = service.process(
+        db, update(4101, 201, photo=[{"file_id": "photo-first"}], media_group_id="717101")
+    )
+    assert first["result"].startswith("submission:")
+    receipt = latest_delivery(db)
+    assert "Work turned in · Essay" in receipt.body
+    assert "Only the first item" in receipt.body
+    second = service.process(
+        db, update(4102, 201, photo=[{"file_id": "photo-second"}], media_group_id="717101")
+    )
+    assert second["result"] == "album_extra"
+    assert latest_delivery(db).id == receipt.id
+    assert db.scalars(select(Submission)).one().telegram_file_id == "photo-first"
+    assert service.process(db, update(4103, 201, photo=[{"file_id": "photo-new"}]))["result"] == (
+        "error:NotFoundError"
+    )
 
 
 def test_ambiguous_teacher_class_requires_fresh_authorized_choice(app, db, data):
@@ -112,9 +145,10 @@ def test_ambiguous_teacher_class_requires_fresh_authorized_choice(app, db, data)
         == "error:AmbiguousReferenceError"
     )
     result = service.process(db, update(4012, 101, f"#{data['class1'].id}"))["result"]
-    assert result.startswith("assignment:")
-    created = db.get(Assignment, int(result.split(":")[-1]))
-    assert created.classroom_id == data["class1"].id
+    assert result == "assignment_preview"
+    context = service.intent_router.context.get(db, data["teacher1"], "101")
+    assert context.pending_payload_json["class_id"] == data["class1"].id
+    assert list(db.scalars(select(Assignment))) == [data["assignment"]]
 
 
 def test_teacher_edit_with_explicit_class_never_reuses_unrelated_focus(app, db, data, monkeypatch):
@@ -147,7 +181,7 @@ def test_new_assignment_does_not_replace_pending_student_photo(app, db, data):
     assert service.process(db, photo)["result"] == "file_needs_context"
     assert service.process(db, update(4021, 101, "Finish the worksheet by tomorrow evening"))[
         "result"
-    ].startswith("assignment:")
+    ] == "assignment_preview"
     context = db.scalar(
         select(ConversationContext).where(ConversationContext.user_id == data["student1"].id)
     )

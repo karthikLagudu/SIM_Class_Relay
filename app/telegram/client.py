@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx2 as httpx
@@ -13,6 +15,21 @@ from app.exceptions import TelegramDeliveryError
 from app.models import NotificationDelivery, User
 
 logger = logging.getLogger(__name__)
+
+
+def telegram_text_parts(body: str, limit: int = 4096) -> Iterator[str]:
+    """Split plain text without losing characters, preferring line and word boundaries."""
+    while body:
+        encoded = body.encode("utf-16-le")
+        if len(encoded) <= limit * 2:
+            yield body
+            return
+        part = encoded[:limit * 2].decode("utf-16-le", errors="ignore")
+        boundary = max(part.rfind("\n"), part.rfind(" "))
+        if boundary >= len(part) // 2:
+            part = part[: boundary + 1]
+        yield part
+        body = body[len(part):]
 
 
 class TelegramClient:
@@ -82,12 +99,8 @@ class TelegramClient:
         if self.settings.telegram_mode == "log":
             logger.info(
                 "telegram_delivery_logged school_id=%s classroom_id=%s assignment_id=%s user_id=%s kind=%s body=%r",
-                school_id,
-                classroom_id,
-                assignment_id,
-                delivery.user_id,
-                kind,
-                body,
+                school_id, classroom_id, assignment_id, delivery.user_id, kind,
+                "[private teacher reply]" if kind == "student_support" else body,
             )
             delivery.status = "logged"
             delivery.attempt_count = 1
@@ -109,6 +122,34 @@ class TelegramClient:
             if not data.get("ok"):
                 raise TelegramDeliveryError("Telegram rejected the message")
             return str(data["result"]["message_id"])
+        except Exception as exc:
+            raise TelegramDeliveryError(self._safe_error(exc)) from exc
+
+    def send_document(
+        self, chat_id: str, path: Path, filename: str, mime_type: str, caption: str,
+    ) -> str:
+        if self.settings.telegram_mode != "real" or not self.settings.telegram_bot_token:
+            raise TelegramDeliveryError("Real Telegram delivery requires a configured bot token")
+        try:
+            root = self.settings.upload_dir.resolve()
+            path = path.resolve()
+            if root not in path.parents or not path.is_file():
+                raise TelegramDeliveryError("The saved attachment is unavailable")
+            with path.open("rb") as document:
+                response = self.http.post(
+                    f"{self.api_base}/sendDocument",
+                    data={"chat_id": chat_id, "caption": caption},
+                    files={"document": (filename, document, mime_type)},
+                )
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("ok"):
+                raise TelegramDeliveryError("Telegram rejected the attachment")
+            return str(data["result"]["message_id"])
+        except TelegramDeliveryError:
+            raise
+        except OSError as exc:
+            raise TelegramDeliveryError("The saved attachment could not be opened") from exc
         except Exception as exc:
             raise TelegramDeliveryError(self._safe_error(exc)) from exc
 

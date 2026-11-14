@@ -3,29 +3,65 @@ const dictation = document.querySelector("[data-dictation]");
 if (dictation) {
   const form = dictation.closest("form");
   const input = form.elements.natural_text;
-  const review = form.querySelector("[data-save-assignment]");
-  const start = dictation.querySelector("[data-record]");
-  const stop = dictation.querySelector("[data-stop]");
-  const cancel = dictation.querySelector("[data-cancel]");
-  const status = dictation.querySelector("[data-record-status]");
-  const format = window.MediaRecorder && [
+  const original = form.elements.source_transcript;
+  const draft = form.querySelector("[data-save-assignment]");
+  const start = form.querySelector("[data-record]");
+  const control = name => dictation.querySelector(`[data-${name}]`);
+  const stop = control("stop");
+  const play = control("play");
+  const recordAgain = control("record-again");
+  const send = control("transcribe");
+  const cancel = control("cancel");
+  const status = control("record-status");
+  const clock = control("recording-clock");
+  const elapsed = control("elapsed");
+  const player = control("recording-audio");
+  const transcript = control("transcript");
+  const append = control("append-transcript");
+  const replace = control("replace-transcript");
+  const format = [
     "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus",
-  ].find(type => MediaRecorder.isTypeSupported(type));
+  ].find(type => window.MediaRecorder?.isTypeSupported?.(type));
   const limit = 5 * 1024 * 1024;
   let current;
+  let stage = "idle";
 
   function stopMicrophone(session) {
-    clearTimeout(session.timer);
+    clearInterval(session.clock);
+    clearTimeout(session.timeout);
     session.stream?.getTracks().forEach(track => track.stop());
   }
 
-  function show(state, message) {
-    start.hidden = state !== "idle";
-    stop.hidden = state !== "recording";
-    cancel.hidden = state === "idle";
-    cancel.textContent = state === "transcribing" ? "Cancel transcription" : "Cancel recording";
-    review.disabled = state !== "idle";
+  function releaseAudio(session) {
+    if (session.url) URL.revokeObjectURL(session.url);
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
+    session.audio = null;
+    session.chunks.length = 0;
+  }
+
+  function updateTextActions() {
+    const hasText = Boolean(input.value.trim());
+    append.textContent = hasText ? "Append to instructions" : "Use transcript";
+    replace.hidden = !hasText;
+  }
+
+  function show(next, message) {
+    stage = next;
+    form.toggleAttribute("data-dictation-active", next !== "idle");
+    const reviewingAudio = next === "audio";
+    const reviewingText = next === "transcript";
+    start.hidden = next !== "idle";
+    stop.hidden = next !== "recording";
+    clock.hidden = next !== "recording";
+    play.hidden = recordAgain.hidden = send.hidden = !reviewingAudio;
+    cancel.hidden = next === "idle";
+    control("record-actions").hidden = next === "idle";
+    control("transcript-review").hidden = !reviewingText;
+    draft.disabled = next !== "idle";
     status.textContent = message;
+    if (reviewingText) updateTextActions();
   }
 
   function finish(session, message, focus = start) {
@@ -34,20 +70,85 @@ if (dictation) {
     session.controller.abort();
     if (session.recorder?.state === "recording") session.recorder.stop();
     stopMicrophone(session);
-    session.chunks.length = 0;
+    releaseAudio(session);
+    transcript.value = "";
     show("idle", message);
     focus?.focus();
   }
 
-  async function transcribe(session) {
+  function stopRecording(session) {
+    if (session?.recorder?.state !== "recording") return;
+    session.recorder.stop();
+    stopMicrophone(session);
+    show("stopping", "Preparing your recording…");
+    cancel.focus();
+  }
+
+  function preparePlayback(session) {
     if (current !== session) return;
     stopMicrophone(session);
-    const audio = new Blob(session.chunks, { type: session.recorder.mimeType || format });
+    session.audio = new Blob(session.chunks, { type: session.recorder.mimeType || format });
     session.chunks.length = 0;
-    if (!audio.size) {
-      finish(session, "No audio was recorded. Try again or type the assignment.");
+    if (!session.audio.size) {
+      finish(session, "No audio was recorded. Try again and speak before pressing Stop, or keep typing.");
       return;
     }
+    session.url = URL.createObjectURL(session.audio);
+    player.src = session.url;
+    show("audio", "Recording ready. Play it back or choose Transcribe.");
+    play.focus();
+  }
+
+  const microphoneErrors = {
+    NotAllowedError: "Microphone permission was denied. Allow access in your browser settings or keep typing.",
+    NotFoundError: "No microphone was found. Plug one in and try again, or keep typing.",
+    NotReadableError: "The microphone couldn’t be read. Check that it’s connected and available, or keep typing.",
+  };
+
+  async function startRecording() {
+    const session = { controller: new AbortController(), chunks: [], size: 0 };
+    current = session;
+    show("permission", "Waiting for microphone permission…");
+    cancel.focus();
+    try {
+      session.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (current !== session) {
+        stopMicrophone(session);
+        return;
+      }
+      const recorder = new MediaRecorder(session.stream, { mimeType: format });
+      session.recorder = recorder;
+      recorder.addEventListener("dataavailable", event => {
+        if (current !== session || !event.data.size) return;
+        session.size += event.data.size;
+        if (session.size > limit) {
+          finish(session, "Recording was too large and was discarded. Try a shorter recording or keep typing.");
+          return;
+        }
+        session.chunks.push(event.data);
+      });
+      recorder.addEventListener("stop", () => preparePlayback(session), { once: true });
+      recorder.addEventListener("error", () => {
+        finish(session, "The microphone stopped working. Check it and try again, or keep typing.");
+      }, { once: true });
+      recorder.start(500);
+      const started = performance.now();
+      elapsed.textContent = "0:00";
+      session.clock = setInterval(() => {
+        const seconds = Math.min(60, Math.floor((performance.now() - started) / 1000));
+        elapsed.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+      }, 200);
+      session.timeout = setTimeout(() => stopRecording(session), 60000);
+      show("recording", "Recording. Choose Stop when you’re ready.");
+      stop.focus();
+    } catch (error) {
+      finish(session, microphoneErrors[error.name] || "The microphone couldn’t start. Check your audio settings or keep typing.");
+    }
+  }
+
+  async function transcribe(session) {
+    const audio = session.audio;
+    releaseAudio(session);
     show("transcribing", "Transcribing recording…");
     cancel.focus();
     try {
@@ -59,83 +160,84 @@ if (dictation) {
       });
       const result = await response.json();
       if (current !== session) return;
-      if (!response.ok || typeof result.text !== "string") {
-        const message = typeof result.detail === "string" ? result.detail : "Transcription failed.";
-        finish(session, message + " Your text is still here.");
+      if (!response.ok || typeof result.text !== "string" || !result.text.trim()) {
+        const message = typeof result.detail === "string"
+          ? result.detail : "Transcription failed. Record again or keep typing.";
+        finish(session, message + " Your instructions are unchanged.");
         return;
       }
-      const separator = input.value ? "\n" : "";
-      if (input.value.length + separator.length + result.text.length > input.maxLength) {
-        finish(session, "There’s no room to add the transcript. Shorten the text and try again.");
-        return;
-      }
-      input.value += separator + result.text;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      finish(session, "Transcript added. Check the class, names, numbers, and deadline before reviewing the draft.", input);
+      session.original = result.text;
+      transcript.value = result.text;
+      show("transcript", "Transcript ready to edit.");
+      transcript.focus();
     } catch {
-      finish(session, "Transcription failed. Your text is still here. Try again or keep typing.");
+      finish(session, "Couldn’t reach transcription. Check your connection and record again, or keep typing. Your instructions are unchanged.");
     }
+  }
+
+  function joinText(first, second) {
+    return [first, second].filter(text => text.trim()).join("\n");
+  }
+
+  function useTranscript(keepText) {
+    const text = transcript.value.trim();
+    if (!text) {
+      status.textContent = "Enter transcript text, or choose Cancel.";
+      transcript.focus();
+      return;
+    }
+    const next = keepText ? joinText(input.value, text) : text;
+    const source = keepText ? joinText(original.value, current.original) : current.original;
+    if (next.length > input.maxLength || source.length > input.maxLength) {
+      status.textContent = "These instructions exceed 5,000 characters. Shorten your text or use Replace instructions.";
+      return;
+    }
+    input.value = next;
+    original.value = source;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    finish(current, "Transcript added. Choose Create draft when the instructions are ready.", input);
   }
 
   dictation.hidden = false;
   if (!navigator.mediaDevices?.getUserMedia || !format) {
-    start.hidden = true;
     dictation.querySelector("#dictation-privacy").hidden = true;
-    status.textContent = "This browser can’t record here. Type the assignment in the field above.";
+    status.textContent = "Recording is unavailable in this browser. Try a browser with microphone access or type the assignment.";
   } else {
-    start.addEventListener("click", async () => {
-      const session = { controller: new AbortController(), chunks: [], size: 0 };
-      current = session;
-      show("permission", "Waiting for microphone permission…");
-      cancel.focus();
-      try {
-        session.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        if (current !== session) {
-          stopMicrophone(session);
-          return;
-        }
-        const recorder = new MediaRecorder(session.stream, { mimeType: format });
-        session.recorder = recorder;
-        recorder.addEventListener("dataavailable", event => {
-          if (current !== session || !event.data.size) return;
-          session.size += event.data.size;
-          if (session.size > limit) {
-            finish(session, "Recording was too large and was discarded. Try a shorter recording.");
-            return;
+    show("idle", "");
+    start.addEventListener("click", startRecording);
+    stop.addEventListener("click", () => stopRecording(current));
+    recordAgain.addEventListener("click", () => {
+      finish(current, "", null);
+      startRecording();
+    });
+    play.addEventListener("click", () => {
+      if (player.paused) {
+        const session = current;
+        player.play().catch(() => {
+          if (current === session && stage === "audio") {
+            status.textContent = "Playback failed. Try Record again or choose Transcribe.";
           }
-          session.chunks.push(event.data);
         });
-        recorder.addEventListener("stop", () => transcribe(session), { once: true });
-        recorder.addEventListener("error", () => {
-          finish(session, "The microphone stopped working. Try again or keep typing.");
-        }, { once: true });
-        recorder.start(500);
-        show("recording", "Recording… Stop and transcribe when you’re ready.");
-        stop.focus();
-        session.timer = setTimeout(() => {
-          finish(session, "The 60-second limit was reached. Audio was discarded. Try a shorter recording.");
-        }, 60000);
-      } catch (error) {
-        finish(session, error.name === "NotAllowedError"
-          ? "Microphone permission was denied. Allow it in your browser or keep typing."
-          : "The microphone couldn’t start. Check your microphone or keep typing.");
+      } else {
+        player.pause();
       }
     });
-    stop.addEventListener("click", () => {
-      if (current?.recorder.state !== "recording") return;
-      current.recorder.stop();
-      stopMicrophone(current);
-      show("transcribing", "Transcribing recording…");
-      cancel.focus();
-    });
-    cancel.addEventListener("click", () => {
-      const transcribing = cancel.textContent === "Cancel transcription";
-      finish(current, transcribing
-        ? "Transcription cancelled. Your text is unchanged."
-        : "Recording discarded. Your text is unchanged.");
+    player.addEventListener("playing", () => { play.textContent = "Pause recording"; });
+    for (const event of ["pause", "ended", "emptied"]) {
+      player.addEventListener(event, () => { play.textContent = "Play recording"; });
+    }
+    send.addEventListener("click", () => transcribe(current));
+    cancel.addEventListener("click", () => finish(current, "Dictation cancelled. Your instructions are unchanged."));
+    input.addEventListener("input", updateTextActions);
+    append.addEventListener("click", () => useTranscript(true));
+    replace.addEventListener("click", () => useTranscript(false));
+    form.addEventListener("submit", event => {
+      if (stage === "idle") return;
+      event.preventDefault();
+      status.textContent = "Finish or cancel dictation before creating the draft.";
     });
     window.addEventListener("pagehide", () => {
-      if (current) finish(current, "Recording ended.", null);
+      if (current) finish(current, "Dictation ended.", null);
     });
   }
 }

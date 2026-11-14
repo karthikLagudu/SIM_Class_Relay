@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.exceptions import TelegramDeliveryError, ValidationError
-from app.models import Submission, User
+from app.models import Classroom, Submission, User
 from app.services.assignment import get_student_state
-from app.services.authorization import require_student_assignment
+from app.services.authorization import require_active_class, require_student_assignment
 from app.services.submission import SubmissionService
 from app.telegram.client import TelegramClient
 
@@ -89,7 +89,8 @@ class TelegramFileService:
         attachment: TelegramAttachment,
         update_id: int,
     ) -> Submission:
-        require_student_assignment(db, user, assignment_id)
+        assignment = require_student_assignment(db, user, assignment_id)
+        require_active_class(db.get(Classroom, assignment.classroom_id))
         state = get_student_state(db, assignment_id, user.id)
         if state.status in {"submitted", "completed", "cancelled"}:
             raise ValidationError(

@@ -1,23 +1,34 @@
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.exceptions import AmbiguousReferenceError, LLMInterpretationError, NotFoundError
+from app.exceptions import (
+    AmbiguousReferenceError,
+    LLMInterpretationError,
+    NotFoundError,
+    ValidationError,
+)
 from app.llm.schemas import TeacherIntent
 from app.llm.service import LLMService
-from app.models import Assignment, ClassMembership, Classroom, ConversationContext, School, User
+from app.models import Assignment, Classroom, ConversationContext, School, User
 from app.services.assignment import AssignmentService
+from app.services.assignment_draft import (
+    class_reference_matches,
+    class_students,
+    resolve_natural_draft,
+)
 from app.services.assignment_reference import (
     AssignmentReferenceService,
     explicit_id,
     model_reference,
     normalize,
 )
+from app.services.authorization import require_teacher_class
 from app.services.notification import NotificationService
 from app.services.risk import RiskService
 from app.telegram.client import TelegramClient
@@ -48,7 +59,7 @@ class TeacherConversation:
         clean = normalize(reference)
         if not clean:
             return []
-        exact = [item for item in classes if normalize(item.name) == clean]
+        exact = [item for item in classes if class_reference_matches(item, reference)]
         return exact or [
             item
             for item in classes
@@ -56,32 +67,88 @@ class TeacherConversation:
             or clean == f"grade {normalize(item.grade).removeprefix('grade ')}"
         ]
 
-    def student_targets(
-        self, db: Session, class_id: int, references: list[str]
-    ) -> list[int] | None:
-        if not references:
-            return None
-        students = list(
-            db.scalars(
-                select(User)
-                .join(ClassMembership, ClassMembership.user_id == User.id)
-                .where(ClassMembership.classroom_id == class_id, ClassMembership.role == "student")
-            )
+    def preview_assignment(
+        self, db: Session, user: User, chat_id: str, classroom: Classroom, text: str,
+        *, now: datetime | None = None,
+    ) -> str:
+        classroom = require_teacher_class(db, user, classroom.id)
+        school = db.get(School, classroom.school_id)
+        now = now or datetime.now(UTC)
+        self.context.set(
+            db, user, chat_id, pending_action="new_assignment",
+            payload={"class_id": classroom.id, "original": text},
         )
-        targets = []
-        for reference in references:
-            matches = [
-                student.id
-                for student in students
-                if reference.strip().casefold()
-                in {student.name.casefold(), student.email.casefold()}
-            ]
-            if len(matches) != 1:
-                raise AmbiguousReferenceError(
-                    "Give the full name or email of each intended student in this class."
-                )
-            targets.append(matches[0])
-        return targets
+        parsed = self.llm.assignment(db, user.id, text, school.timezone, now)
+        students = class_students(db, classroom.id)
+        due_at, named_ids = resolve_natural_draft(parsed, text, classroom, school, students, None, now)
+        ids = named_ids if named_ids is not None else [student.id for student in students]
+        if not ids:
+            raise ValidationError("Enroll a student before creating an assignment for this class.")
+        recipients = (
+            ", ".join(student.name for student in students if student.id in ids)
+            if named_ids is not None else f"Entire class ({len(ids)} students)"
+        )
+        body = (
+            f"Assignment draft\n{parsed.title}\n\n{parsed.instructions}\n\n"
+            f"Class: {classroom.name}\nRecipients: {recipients}\n"
+            f"Due: {self.notifications.format_deadline(due_at, school.timezone)}\n\n"
+            "Tap Publish or Cancel, or send revised wording for a new preview."
+        )
+        if len(body.encode("utf-16-le")) > 8192:
+            raise ValidationError("This draft is too long to review in Telegram. Shorten it or use the Class Relay assignment form.")
+        nonce = secrets.token_urlsafe(16)
+        self.context.set(
+            db, user, chat_id, pending_action="assignment_preview",
+            payload={
+                "nonce": nonce, "class_id": classroom.id, "original": text, "title": parsed.title,
+                "instructions": parsed.instructions, "due_at": due_at.isoformat(),
+                "timezone": school.timezone, "student_ids": ids, "whole_class": named_ids is None,
+            },
+        )
+        self.client.send(
+            db, user, chat_id, body, kind="teacher_draft_preview",
+            reply_markup={"inline_keyboard": [[
+                {"text": "Publish", "callback_data": f"publish_draft:{nonce}"},
+                {"text": "Cancel", "callback_data": f"cancel_draft:{nonce}"},
+            ]]},
+        )
+        return "assignment_preview"
+
+    def confirm_assignment(
+        self, db: Session, user: User, chat_id: str, nonce: str, *, publish: bool,
+    ) -> str:
+        context = self.context.get(db, user, chat_id)
+        plan = context.pending_payload_json if context and context.pending_action == "assignment_preview" else None
+        if not plan or plan["nonce"] != nonce:
+            raise ValidationError("This preview is no longer active. Use the latest preview or start a new draft.")
+        if not publish:
+            self.context.clear(db, user, chat_id)
+            self.client.send(db, user, chat_id, "Draft cancelled.", kind="help")
+            return "assignment_preview_cancelled"
+        classroom = require_teacher_class(db, user, plan["class_id"])
+        school = db.get(School, classroom.school_id)
+        current_ids = {student.id for student in class_students(db, classroom.id)}
+        reviewed_ids = set(plan["student_ids"])
+        if (
+            school.timezone != plan["timezone"]
+            or not reviewed_ids.issubset(current_ids)
+            or (plan["whole_class"] and current_ids != reviewed_ids)
+        ):
+            raise ValidationError("The recipients or school time zone changed. Send revised wording to review a fresh draft.")
+        assignment = self.assignments.create(
+            db, user, classroom.id, plan["title"], plan["instructions"],
+            datetime.fromisoformat(plan["due_at"]), plan["timezone"],
+            f"telegram-preview:{user.id}:{nonce}", plan["student_ids"], draft=True,
+            original_request=plan["original"],
+        )
+        self.assignments.publish(db, user, assignment.id)
+        self.context.set(db, user, chat_id, assignment_id=assignment.id)
+        self.client.send(
+            db, user, chat_id, f"Published #{assignment.id}: {assignment.title}.",
+            kind="teacher_confirmation", school_id=school.id, classroom_id=classroom.id,
+            assignment_id=assignment.id,
+        )
+        return f"assignment:{assignment.id}"
 
     def route(
         self,
@@ -180,36 +247,7 @@ class TeacherConversation:
             classroom = options[0]
 
         if parsed.intent == "create_assignment":
-            school = db.get(School, classroom.school_id)
-            due_at = self._teacher_deadline(
-                db, user, text, parsed, timezone_name, school.timezone, now
-            )
-            if not parsed.title or not parsed.instructions:
-                raise LLMInterpretationError("What should students do, and when is it due?")
-            assignment = self.assignments.create(
-                db,
-                user,
-                classroom.id,
-                parsed.title,
-                parsed.instructions,
-                due_at,
-                school.timezone,
-                f"telegram:{update_id}:assignment",
-                student_ids=self.student_targets(db, classroom.id, parsed.student_targets),
-            )
-            self.context.set(db, user, chat_id, assignment_id=assignment.id)
-            self.client.send(
-                db,
-                user,
-                chat_id,
-                f"Created #{assignment.id}: {assignment.title}.",
-                kind="teacher_confirmation",
-                school_id=assignment.school_id,
-                classroom_id=assignment.classroom_id,
-                assignment_id=assignment.id,
-                idempotency_key=f"teacher-confirm:{update_id}",
-            )
-            return f"assignment:{assignment.id}"
+            return self.preview_assignment(db, user, chat_id, classroom, text, now=now)
         if parsed.intent in {"risk_summary", "class_status"}:
             if context and context.pending_action == "teacher_class":
                 self.context.clear(db, user, chat_id)

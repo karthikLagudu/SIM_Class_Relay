@@ -12,11 +12,13 @@ from app.models import (
     ClassMembership,
     Classroom,
     NotificationDelivery,
+    School,
     SchoolMembership,
+    StudentSupportReply,
     Submission,
     User,
 )
-from app.telegram.client import TelegramClient
+from app.telegram.client import TelegramClient, telegram_text_parts
 
 
 class NotificationService:
@@ -184,6 +186,46 @@ class NotificationService:
                 }]]
             },
         )
+
+    def notify_student_support(
+        self, db: Session, assignment: Assignment, student: User, teacher: User,
+        classroom: Classroom, reply: StudentSupportReply,
+    ) -> NotificationDelivery:
+        school = db.get(School, assignment.school_id)
+        deadline = self.format_deadline(assignment.due_at, assignment.timezone)
+        key = f"support-reply:{reply.id}"
+        body = (
+            f"Help from {teacher.name}\n"
+            f"For {student.name}\n"
+            f"School: {school.name}\n"
+            f"Class: {classroom.name}\n"
+            f"Assignment: {assignment.title}\n"
+            f"Due: {deadline}"
+        )
+        if reply.original_filename:
+            body += f"\nAttachment: {reply.original_filename}"
+        if reply.message:
+            body += f"\n\nTeacher’s note\n{reply.message}"
+        first, *remaining = telegram_text_parts(body)
+        actions = {"inline_keyboard": [[{
+            "text": "Open assignment", "callback_data": f"assignment:{assignment.id}",
+        }]]}
+        delivery = self._send(
+            db, assignment, student, "student_support", first, key,
+            reply_markup=None if remaining else actions,
+        )
+        for index, part in enumerate(remaining, start=2):
+            self._send(
+                db, assignment, student, "student_support", part, f"{key}:text:{index}",
+                reply_markup=actions if index == len(remaining) + 1 else None,
+            )
+        if reply.stored_file_path:
+            caption = f"Help attachment from {teacher.name}\n{classroom.name} · {assignment.title}"
+            self._send(
+                db, assignment, student, "student_support",
+                next(telegram_text_parts(caption, limit=1024)), f"{key}:attachment",
+            )
+        return delivery
 
     def notify_staff(
         self, db: Session, assignment: Assignment, student: User, kind: str, event_id: int,

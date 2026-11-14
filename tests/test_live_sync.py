@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import (
+    ClassMembership,
     NotificationDelivery,
     ProcessedTelegramUpdate,
     ProgressEvent,
@@ -99,6 +100,59 @@ def test_telegram_progress_and_submission_refresh_the_authorized_web_views(clien
     assert client.get("/api/live/student").json() == classmate
 
 
+def test_teacher_help_alerts_include_web_and_telegram_requests_in_class_scope(client, app, db, data):
+    assignment = data["assignment"]
+    class_id = data["class1"].id
+    teacher = data["teacher1"]
+    student = data["student1"]
+    feed = "/api/live/teacher?help_after=0"
+    authenticate(client, app, teacher.id)
+    page = client.get(f"/teacher/classes/{class_id}/assignments/new")
+    assert 'data-teacher-help-cursor="0"' in page.text
+    assert client.get(feed).json()["help_requests"] == []
+
+    token = authenticate(client, app, student.id)
+    web_message = "I’m stuck on question 2.\nWhat does <example> mean?"
+    result = client.post(
+        f"/student/assignments/{assignment.id}/progress",
+        data={"csrf_token": token, "status": "blocked", "message": web_message},
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    assert client.get(feed).status_code == 403
+
+    telegram_message = "I also need help with the diagram."
+    app.state.telegram_service.process(
+        db, message(9130, 201, f"/blocked {assignment.id} {telegram_message}")
+    )
+    db.commit()
+    authenticate(client, app, data["teacher2"].id)
+    assert client.get(feed).json()["help_requests"] == []
+
+    authenticate(client, app, teacher.id)
+    response = client.get(feed)
+    assert response.headers["cache-control"] == "no-store"
+    first, second = response.json()["help_requests"]
+    assert [first["message"], second["message"]] == [web_message, telegram_message]
+    assert first["student"] == student.name
+    assert first["classroom"] == data["class1"].name and first["school"] == data["school1"].name
+    assert first["assignment"] == assignment.title
+    assert "IST" in first["requested_at"] and "IST" in first["due_at"]
+    assert client.get(first["url"]).status_code == 200
+    reopened = client.get("/teacher")
+    assert f'data-teacher-help-cursor="{first["id"] - 1}"' in reopened.text
+    assert client.get(f"/api/live/teacher?help_after={first['id']}").json()["help_requests"] == [second]
+    assert client.get(f"/api/live/teacher?help_after={second['id']}").json()["help_requests"] == []
+
+    membership = db.scalar(select(ClassMembership).where(
+        ClassMembership.classroom_id == class_id, ClassMembership.user_id == teacher.id,
+        ClassMembership.role == "teacher",
+    ))
+    db.delete(membership)
+    db.commit()
+    assert client.get(feed).json()["help_requests"] == []
+
+
 def test_web_submission_and_feedback_queue_real_telegram_updates(client, app, db, data, monkeypatch):
     telegram = app.state.telegram_client
     monkeypatch.setattr(telegram.settings, "telegram_mode", "real")
@@ -158,6 +212,11 @@ def test_teacher_can_publish_from_menu_and_students_get_delivery(client, app, db
         "pending_assignment"
     )
     result = service.process(db, message(9302, 101, "Read chapter 3 by tomorrow at 5 pm."))["result"]
+    assert result == "assignment_preview"
+    assert client.get("/api/live/student").json() == before
+    context = service.intent_router.context.get(db, data["teacher1"], "101")
+    nonce = context.pending_payload_json["nonce"]
+    result = service.process(db, tap(9303, 101, f"publish_draft:{nonce}"))["result"]
     assert result.startswith("assignment:")
     db.commit()
     assert client.get("/api/live/student").json() != before
@@ -219,12 +278,21 @@ def test_staff_help_alerts_recheck_school_access_before_sending(app, db, data, m
     assignment_id = data["assignment"].id
     service = app.state.telegram_service
     assert service.process(db, tap(9400, 201, f"ask:{assignment_id}"))["result"] == (
-        f"pending_help:{assignment_id}"
+        f"progress:{assignment_id}:blocked"
     )
+    db.commit()
+    queued = db.scalars(select(NotificationDelivery).where(
+        NotificationDelivery.kind == "staff_help"
+    )).all()
+    assert {alert.user_id for alert in queued} == {data["teacher1"].id, coordinator.id}
+    event = db.scalars(select(ProgressEvent)).one()
+    assert "A note may follow." in event.message
+    service.process(db, tap(9402, 201, f"ask:{assignment_id}"))
     assert service.process(db, message(9401, 201, "Can you explain question 3?"))["result"] == (
         f"progress:{assignment_id}:blocked"
     )
     db.commit()
+    assert db.scalars(select(ProgressEvent)).one().message == "Can you explain question 3?"
     alerts = db.scalars(select(NotificationDelivery).where(
         NotificationDelivery.kind == "staff_help"
     )).all()

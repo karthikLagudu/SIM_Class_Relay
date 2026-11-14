@@ -32,7 +32,8 @@
     <input type="hidden" name="targeting_mode" value="selected">
     <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
     <input type="hidden" name="entry" value="{{ entry }}">
-    <input type="hidden" name="draft" value="true">
+    <input type="hidden" name="source_transcript" value="{{ form.get('source_transcript', '') }}">
+    {% if entry == "manual" and form.get("natural_text") %}<textarea name="natural_text" hidden>{{ form.natural_text }}</textarea>{% endif %}
     <div class="editor-layout">
     <div class="stack">
     {% if entry == "manual" %}
@@ -41,26 +42,47 @@
       <div class="editor-field"><label for="assignment-due">Deadline ({{ school.timezone }})</label><input type="datetime-local" id="assignment-due" name="due_at" value="{{ form.get('due_at','') }}" required {{ invalid(errors,'due_at') }}>{{ field_error(errors,'due_at') }}</div>
     {% else %}
       <div class="editor-field">
-        <label for="natural-text">Work and deadline</label>
+        <div class="dictation-field-heading">
+          <label for="natural-text">Work and deadline</label>
+          {% if workspace == 'teacher' and speech_available %}
+          <button type="button" class="ghost-button" data-record aria-controls="assignment-dictation" aria-describedby="dictation-privacy" hidden>
+            <span aria-hidden="true">🎙</span> Dictate assignment
+          </button>
+          {% endif %}
+        </div>
         <textarea id="natural-text" name="natural_text" rows="5" maxlength="5000" required aria-describedby="assignment-example{% if errors.get('natural_text') %} natural_text-error{% endif %}" {% if errors.get('natural_text') %}aria-invalid="true"{% endif %}>{{ form.get('natural_text','') }}</textarea>
         {{ field_error(errors,'natural_text') }}
       </div>
       {% if workspace == 'teacher' %}
       {% if speech_available %}
-      <div class="dictation" data-dictation data-endpoint="/teacher/classes/{{ classroom.id }}/assignments/transcribe" hidden>
-        <div class="actions">
-          <button type="button" class="ghost-button" data-record aria-describedby="dictation-privacy">
-            <span aria-hidden="true">🎙</span> Start recording
-          </button>
-          <button type="button" class="ghost-button" data-stop hidden>Stop and transcribe</button>
-          <button type="button" class="ghost-button" data-cancel hidden>Cancel recording</button>
+      <div class="dictation" id="assignment-dictation" data-dictation data-endpoint="/teacher/classes/{{ classroom.id }}/assignments/transcribe" hidden>
+        <p class="field-hint" id="dictation-privacy">Record up to 60 seconds. Audio stays on this page until you choose Transcribe. Class Relay sends it to the configured speech provider and discards the recording after processing.</p>
+        <p class="dictation-status" role="status" aria-atomic="true" data-record-status></p>
+        <p class="dictation-clock" data-recording-clock hidden>Elapsed <time data-elapsed>0:00</time></p>
+        <audio preload="metadata" data-recording-audio hidden></audio>
+        <div class="actions" data-record-actions hidden>
+          <button type="button" class="ghost-button" data-stop hidden>Stop</button>
+          <button type="button" class="ghost-button" data-play hidden>Play recording</button>
+          <button type="button" class="ghost-button" data-record-again hidden>Record again</button>
+          <button type="button" class="primary" data-transcribe hidden>Transcribe</button>
+          <button type="button" class="ghost-button" data-cancel hidden>Cancel</button>
         </div>
-        <p class="field-hint" id="dictation-privacy">Record up to 60 seconds. Stopping sends the audio to OpenAI for transcription. Class Relay discards the recording after processing.</p>
-        <p class="dictation-status" role="status" data-record-status></p>
+        <div class="editor-field" data-transcript-review hidden>
+          <label for="assignment-transcript">Transcript</label>
+          <textarea id="assignment-transcript" data-transcript rows="4" maxlength="5000" aria-describedby="transcript-hint"></textarea>
+          <p class="field-hint" id="transcript-hint">Check names, class, numbers, and deadline. Edit any misheard words before using the transcript.</p>
+          <div class="actions">
+            <button type="button" class="primary" data-append-transcript>Append to instructions</button>
+            <button type="button" class="ghost-button" data-replace-transcript>Replace instructions</button>
+          </div>
+        </div>
       </div>
       {% else %}
       <p class="field-hint">Dictation is unavailable. You can type the work above or enter the details manually.</p>
       {% endif %}
+      {% endif %}
+      {% if form.get('source_transcript') %}
+      <details class="work-content"><summary>Original transcript</summary><p class="preserve-lines">{{ form.source_transcript }}</p></details>
       {% endif %}
       <p class="field-hint" id="assignment-example">Example: “Complete questions 1–10 from the energy worksheet and upload a photo by tomorrow at 6 PM.”</p>
     {% endif %}
@@ -74,7 +96,7 @@
       {% endfor %}
     </fieldset>
     </div>
-    <div class="actions"><button class="primary" data-save-assignment>{{ 'Save as draft' if entry == 'manual' else 'Review draft' }}</button><a class="ghost-button button-link" href="{{ classwork_url }}">Back to classwork</a></div>
+    <div class="actions"><button class="primary" data-save-assignment>Create draft</button>{% if entry != "manual" and errors.get('natural_text') %}<button class="ghost-button" name="use_manual" value="true" formnovalidate>Edit manually</button>{% endif %}<a class="ghost-button button-link" href="{{ classwork_url }}">Back to classwork</a></div>
     <p class="field-hint">Review the draft before publishing. Students receive notifications only after you publish.</p>
   </form>
 </section>

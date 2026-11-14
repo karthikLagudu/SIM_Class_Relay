@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components.html" import support_reply %}
+{% from "components.html" import support_reply, delivery_badge, delivery_help %}
 {% block content %}
 <nav class="breadcrumbs" aria-label="Breadcrumb">
   <a href="/{{ workspace }}/classes/{{ classroom.id }}#student-{{ student.id }}">{{ classroom.name }} roster</a>
@@ -39,7 +39,17 @@
   {% if replies[assignment.id] %}
   <div class="section-divider">
     <h3>Teacher replies</h3>
-    {% for reply, author in replies[assignment.id] %}{{ support_reply(reply, author, workspace, assignment.timezone, inline_image_types) }}{% endfor %}
+    {% for reply, author in replies[assignment.id] %}
+    <div class="stack">
+      {{ support_reply(reply, author, workspace, assignment.timezone, inline_image_types) }}
+      {% for label, delivery in delivery_parts.get(reply.id|string, []) %}
+      <div class="delivery-line">
+        <strong>Telegram {{ label|lower }}</strong> {{ delivery_badge(delivery.status) }}
+        <span>{% if delivery.status == 'failed' and not delivery.next_attempt_at %}Telegram could not deliver this. The reply is available in Class Relay.{% elif delivery.status == 'skipped' and delivery.error != 'User has not linked Telegram' %}{{ delivery.error or 'This delivery is no longer eligible.' }}{% else %}{{ delivery_help(delivery.status, delivery.error != 'User has not linked Telegram') }}{% endif %}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
   </div>
   {% endif %}
   {% if can_reply and assignment.status == "assigned" %}
@@ -51,7 +61,7 @@
       {% if focused and error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
       <label>Message for {{ student.name }}<textarea name="message" rows="3" maxlength="5000">{{ draft_message if focused else '' }}</textarea></label>
       <label>Image or file<input type="file" name="file" aria-describedby="support-hint-{{ assignment.id }}"></label>
-      <p class="field-hint" id="support-hint-{{ assignment.id }}">Add a message, one file up to {{ max_upload_mb }} MB, or both. The student and authorized school staff can see your reply.</p>
+      <p class="field-hint" id="support-hint-{{ assignment.id }}">Add a message, one file up to {{ max_upload_mb }} MB, or both. The reply is saved in Class Relay and sent to the student’s linked Telegram chat.</p>
       <div class="actions"><button class="primary">Send help to student</button></div>
     </form>
   </details>

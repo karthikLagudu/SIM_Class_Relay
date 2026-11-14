@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -19,14 +18,6 @@ from app.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from app.llm.assignment_text import (
-    AMBIGUOUS_NUMBER,
-    GRADE_REFERENCE,
-    RECIPIENT_PREFIX,
-    parse_known_deadline,
-    reference_words,
-)
-from app.llm.schemas import AssignmentIntent
 from app.llm.speech import TranscriptionError
 from app.models import (
     ActivityEvent,
@@ -43,6 +34,7 @@ from app.models import (
     User,
 )
 from app.reminders.policy import aware_utc
+from app.services.assignment_draft import class_students, resolve_natural_draft
 from app.services.authorization import (
     list_teacher_classes,
     require_active_class,
@@ -71,12 +63,15 @@ from app.web.submissions import render_submission
 router = APIRouter()
 MAX_RECORDING_BYTES = 5 * 1024 * 1024
 RECORDING_EXTENSIONS = {"audio/webm": "webm", "audio/mp4": "m4a", "audio/ogg": "ogg"}
+ClassworkView = Literal["overview", "attention", "help", "due"]
 
 
 @router.get("/teacher", response_class=HTMLResponse)
 def teacher_dashboard(
     request: Request,
     class_id: str = "",
+    view: ClassworkView = "overview",
+    page: int = Query(1, ge=1),
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
@@ -88,7 +83,8 @@ def teacher_dashboard(
         raise ValidationError("Choose one of your assigned classes.") from exc
     active = require_teacher_class(db, user, selected_id) if selected_id is not None else None
     return _render_classwork(
-        request, user, db, active, request.state.teaching_classes, request.state.teaching_schools
+        request, user, db, active, request.state.teaching_classes, request.state.teaching_schools,
+        view, page,
     )
 
 
@@ -114,20 +110,25 @@ def _staff_class(request: Request, db: Session, user: User, class_id: int):
 
 @router.get("/coordinator/classes/{class_id}/work", response_class=HTMLResponse)
 def coordinator_classwork(
-    request: Request, class_id: int, user: User = Depends(web_user), db: Session = Depends(get_db)
+    request: Request,
+    class_id: int,
+    view: ClassworkView = "overview",
+    page: int = Query(1, ge=1),
+    user: User = Depends(web_user),
+    db: Session = Depends(get_db),
 ):
     active = require_coordinator_class(db, user, class_id)
     return _render_classwork(
-        request, user, db, active, [], {active.school_id: db.get(School, active.school_id)}
+        request, user, db, active, [], {active.school_id: db.get(School, active.school_id)}, view, page
     )
 
 
-def _render_classwork(request, user, db, active, classes, schools):
+def _render_classwork(request, user, db, active, classes, schools, view, page):
     assignments, risks, reviews, deliveries = [], [], [], []
     scope = [active] if active else classes
     class_ids = [item.id for item in scope]
     open_ids = [item.id for item in scope if item.archived_at is None]
-    if class_ids:
+    if class_ids and view in {"overview", "due"}:
         assignments = list(
             db.scalars(
                 select(Assignment)
@@ -135,10 +136,11 @@ def _render_classwork(request, user, db, active, classes, schools):
                 .order_by(Assignment.due_at, Assignment.id)
             )
         )
-    if open_ids:
+    if open_ids and view != "due":
         risks = RiskService().for_classes(db, open_ids)
+    if open_ids and view == "overview":
         reviews = db.execute(pending_reviews(open_ids)).all()
-    if active:
+    if active and view == "overview":
         deliveries = list(
             db.scalars(
                 select(NotificationDelivery)
@@ -160,6 +162,18 @@ def _render_classwork(request, user, db, active, classes, schools):
         and item.status == "assigned"
         and now <= aware_utc(item.due_at) <= now + timedelta(days=1)
     ]
+    help_requests = [item for item in risks if "blocked" in item.reasons]
+    attention = sorted(
+        risks,
+        key=lambda item: (
+            "blocked" not in item.reasons, -item.risk_score, item.student_name,
+            item.assignment_id, item.student_id,
+        ),
+    )
+    items = {"attention": attention, "help": help_requests, "due": due_soon}.get(view, [])
+    page_size = 12
+    page_count = max(1, (len(items) + page_size - 1) // page_size)
+    page = min(page, page_count)
     return render(
         request,
         "teacher/dashboard.html",
@@ -172,30 +186,24 @@ def _render_classwork(request, user, db, active, classes, schools):
         school=schools[active.school_id] if active else None,
         assignments=assignments,
         due_soon=due_soon,
-        risks=risks,
+        risks=attention,
         reviews=reviews,
-        blocked_count=len({item.student_id for item in risks if "blocked" in item.reasons}),
+        blocked_count=len({item.student_id for item in help_requests}),
+        view=view,
+        items=items[(page - 1) * page_size : page * page_size],
+        item_count=len(items),
+        page=page,
+        page_count=page_count,
         deliveries=deliveries,
         csrf_token=csrf(request),
         message=request.query_params.get("message"),
     )
 
 
-def _class_students(db: Session, classroom_id: int) -> list[User]:
-    return list(
-        db.scalars(
-            select(User)
-            .join(ClassMembership, ClassMembership.user_id == User.id)
-            .where(ClassMembership.classroom_id == classroom_id, ClassMembership.role == "student")
-            .order_by(User.name)
-        )
-    )
-
-
 def _render_assignment_form(
     request, db, user, classroom, school, *, entry="natural", form=None, errors=None
 ):
-    students = _class_students(db, classroom.id)
+    students = class_students(db, classroom.id)
     return render(
         request,
         "teacher/new_assignment.html",
@@ -265,6 +273,13 @@ async def transcribe_assignment(
         audio.extend(chunk)
     if not audio:
         raise HTTPException(422, "The recording is empty. Try recording again.")
+    signature = {
+        "audio/webm": audio[:4] == b"\x1a\x45\xdf\xa3",
+        "audio/ogg": audio[:4] == b"OggS",
+        "audio/mp4": audio[4:8] == b"ftyp",
+    }
+    if not signature[content_type]:
+        raise HTTPException(415, "The recording could not be read. Try recording again or type the work.")
     try:
         transcript = await run_in_threadpool(
             provider.transcribe, bytes(audio), f"assignment.{extension}", content_type
@@ -278,96 +293,6 @@ async def transcribe_assignment(
     return {"text": transcript}
 
 
-def _take_source_phrase(text: str, phrase: str) -> str | None:
-    words = r"\s+".join(re.escape(word) for word in phrase.split())
-    if not words:
-        return None
-    match = re.search(rf"(?<!\w){words}(?!\w)", text, re.IGNORECASE)
-    return text[: match.start()] + " " + text[match.end() :] if match else None
-
-
-def _resolve_natural_draft(
-    parsed: AssignmentIntent,
-    source: str,
-    classroom: Classroom,
-    school: School,
-    students: list[User],
-    selected_ids: list[int] | None,
-    now: datetime,
-) -> tuple[datetime, list[int] | None]:
-    work = source
-    expression = parsed.due_expression
-    if not expression or (work := _take_source_phrase(work, expression)) is None:
-        raise LLMInterpretationError("What day and time should the assignment be due?")
-    try:
-        known = parse_known_deadline(expression, school.timezone, now)
-        local = parsed.due_at.astimezone(ZoneInfo(school.timezone))
-        deadline = parse_local_deadline(local.replace(tzinfo=None).isoformat(), school.timezone)
-        if local.utcoffset() != parsed.due_at.utcoffset() or (known and deadline != known):
-            raise ValueError
-    except (ValidationError, ValueError) as exc:
-        raise LLMInterpretationError(
-            "What exact date and time should the assignment be due in the school’s time zone?"
-        ) from exc
-    if deadline <= now:
-        raise LLMInterpretationError(
-            "The deadline is in the past. What future date and time should I use?"
-        )
-
-    # The class selector sets scope. A conflicting name in the text must never silently reroute it.
-    if parsed.class_reference:
-        reference = reference_words(parsed.class_reference)
-        name = reference_words(classroom.name)
-        short_name = re.match(r"grade \d+ [a-z]\b", name)
-        allowed = {name}
-        if short_name:
-            allowed.update((short_name[0], short_name[0].removeprefix("grade ")))
-        work = _take_source_phrase(work, parsed.class_reference)
-        if reference not in allowed or work is None:
-            raise LLMInterpretationError(
-                f"Did you mean {classroom.name}? Correct the class in your description "
-                "or open the assignment form for the intended class."
-            )
-    if GRADE_REFERENCE.search(work):
-        raise LLMInterpretationError(
-            f"Is {classroom.name} the intended class? Use its full name or leave the class to the selector."
-        )
-
-    if not parsed.student_targets and RECIPIENT_PREFIX.match(work):
-        raise LLMInterpretationError(
-            "Who should receive the assignment? Enter their full names or use the recipient checkboxes."
-        )
-    named_ids = set()
-    for target in parsed.student_targets:
-        name_or_email = target.strip().casefold()
-        matches = [
-            student.id
-            for student in students
-            if name_or_email in {student.name.casefold(), student.email.casefold()}
-        ]
-        work = _take_source_phrase(work, target)
-        if len(matches) != 1 or work is None:
-            raise LLMInterpretationError(
-                f"Which student did you mean by “{target}”? Use their full name or email in {classroom.name}."
-            )
-        named_ids.add(matches[0])
-    if named_ids and selected_ids is not None and set(selected_ids) not in (
-        named_ids, {student.id for student in students}
-    ):
-        raise LLMInterpretationError(
-            "Who should receive the assignment? Make the names in the description match "
-            "the selected recipients."
-        )
-    if AMBIGUOUS_NUMBER.search(work) or re.findall(r"\d+", work) != re.findall(
-        r"\d+", parsed.instructions
-    ):
-        raise LLMInterpretationError(
-            "What exact question, page, or chapter numbers should students use? "
-            "Check the numbers in your description."
-        )
-    return deadline, sorted(named_ids) if named_ids else selected_ids
-
-
 @router.post("/coordinator/assignments")
 @router.post("/teacher/assignments")
 def create_assignment(
@@ -376,13 +301,14 @@ def create_assignment(
     idempotency_key: str = Form(),
     csrf_token: str = Form(),
     natural_text: str = Form(default=""),
+    source_transcript: str = Form(default=""),
     title: str = Form(default=""),
     instructions: str = Form(default=""),
     due_at: str = Form(default=""),
     entry: str = Form(default="natural"),
     student_ids: list[int] = Form(default=[]),
     targeting_mode: str = Form(default="all"),
-    draft: bool = Form(default=False),
+    use_manual: bool = Form(default=False),
     user: User = Depends(web_user),
     db: Session = Depends(get_db),
 ):
@@ -391,13 +317,21 @@ def create_assignment(
     school = db.get(School, classroom.school_id)
     values = {
         "natural_text": natural_text,
+        "source_transcript": source_transcript[:5000],
         "title": title,
         "instructions": instructions,
         "due_at": due_at,
         "student_ids": student_ids,
         "idempotency_key": idempotency_key,
     }
+    if use_manual and entry != "manual":
+        values["instructions"] = natural_text
+        return _render_assignment_form(
+            request, db, user, classroom, school, entry="manual", form=values
+        )
     errors = {}
+    if len(source_transcript) > 5000:
+        errors["general"] = "Use a transcript of up to 5,000 characters before saving the draft."
     targets = student_ids if targeting_mode == "selected" else None
     if targeting_mode == "selected" and not student_ids:
         errors["recipients"] = "Choose at least one student."
@@ -427,12 +361,12 @@ def create_assignment(
                 parsed = request.app.state.llm_service.assignment(
                     db, user.id, natural_text, school.timezone, now
                 )
-                deadline, targets = _resolve_natural_draft(
+                deadline, targets = resolve_natural_draft(
                     parsed,
                     natural_text,
                     classroom,
                     school,
-                    _class_students(db, classroom.id),
+                    class_students(db, classroom.id),
                     targets,
                     now,
                 )
@@ -459,9 +393,9 @@ def create_assignment(
             school.timezone,
             idempotency_key,
             targets,
-            draft=draft or entry != "manual",
+            draft=True,
             coordinator=_workspace(request) == "coordinator",
-            original_request=natural_text if entry != "manual" else None,
+            original_request=source_transcript or natural_text or None,
         )
         db.commit()
     except (ValidationError, IntegrityError, OperationalError) as exc:
@@ -692,7 +626,7 @@ def _render_assignment(
         },
         recipients=recipients,
         editing_draft=editing,
-        draft_students=_class_students(db, classroom.id) if editing else [],
+        draft_students=class_students(db, classroom.id) if editing else [],
         draft_recipient_ids=form.get("student_ids", [student.id for student in recipients]),
         student_names={student.id: student.name for student in recipients},
         student_states={state.student_id: state for state, _ in rows},

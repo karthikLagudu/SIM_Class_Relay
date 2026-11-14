@@ -50,7 +50,7 @@
   <title>Class Relay | Super Intelli Machines</title>
   <link rel="icon" type="image/png" sizes="84x84" href="{{ url_for('static', path='/images/sim-mark.png') }}">
   <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}">
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/workspace.css') }}?v=project-footer">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/workspace.css') }}?v=help-alerts">
 </head>
 <body data-theme="{{ workspace or 'public' }}">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -134,6 +134,7 @@
     </form>
       {% elif workspace == 'teacher' and teaching_classes %}
       <form class="scope-picker" action="{{ '/teacher/submissions' if path == '/teacher/submissions' else '/teacher' }}" method="get" aria-label="Switch classes">
+        {% if path == '/teacher' and view is defined and view != 'overview' %}<input type="hidden" name="view" value="{{ view }}">{% endif %}
         <label for="active-class">Active class</label>
         <select id="active-class" name="class_id">
           <option value="{{ '0' if path == '/teacher/submissions' else '' }}">All classes</option>
@@ -155,6 +156,26 @@
     {% if message %}<div class="flash" role="status"><span class="flash-icon" aria-hidden="true">✓</span><span>{{ message }}</span></div>{% endif %}
     {% block content %}{% endblock %}
   </main>
+  {% if help_cursor is not none and workspace == 'teacher' %}
+  <aside class="teacher-help-alert" data-teacher-help-cursor="{{ help_cursor }}" data-teacher-id="{{ user.id }}" aria-labelledby="teacher-help-title" hidden>
+    <header class="teacher-help-header">
+      <h2 id="teacher-help-title">Help requested</h2>
+      <button class="ghost-button" type="button" data-help-dismiss aria-label="Dismiss help notification">×</button>
+    </header>
+    <div class="teacher-help-details" tabindex="0" role="region" aria-label="Help request details">
+      <p class="teacher-help-student" data-help-student></p>
+      <p class="teacher-help-class" data-help-class></p>
+      <dl>
+        <div><dt>Assignment</dt><dd data-help-assignment></dd></div>
+        <div><dt>Requested</dt><dd data-help-requested></dd></div>
+        <div><dt>Due</dt><dd data-help-due></dd></div>
+      </dl>
+      <p class="teacher-help-message" data-help-message></p>
+    </div>
+    <a class="primary button-link" data-help-open target="_blank" rel="noopener" aria-label="Open help request in a new tab">Open help request</a>
+  </aside>
+  <div class="teacher-help-announcement" role="status" data-help-announcement></div>
+  {% endif %}
   <footer class="site-footer">
     <div class="footer-inner">
       <div class="footer-brand">
@@ -174,7 +195,9 @@
   </footer>
   <div id="form-progress" class="pending-feedback" role="status" hidden></div>
   <script src="{{ url_for('static', path='/js/workspace.js') }}" defer></script>
-  {% if live_version %}<script src="{{ url_for('static', path='/js/live.js') }}" defer></script>{% endif %}
+  {% if live_version or (help_cursor is not none and workspace == 'teacher') %}
+  <script src="{{ url_for('static', path='/js/live.js') }}?v=help-alert-details" defer></script>
+  {% endif %}
   {% block scripts %}{% endblock %}
 </body>
 </html>

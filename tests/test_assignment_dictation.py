@@ -10,6 +10,53 @@ from app.llm.speech import OpenAISpeechProvider, TranscriptionError
 from app.models import Assignment, AssignmentTarget, NotificationDelivery, StudentAssignmentState
 from tests.conftest import authenticate
 
+WEBM = b"\x1a\x45\xdf\xa3"
+SPOKEN_ASSIGNMENT = (
+    "Grade 8A, complete questions one through ten from chapter four by tomorrow evening. "
+    "Draw a labeled diagram of photosynthesis."
+)
+
+
+def test_dictated_example_preserves_original_and_publishes_to_selected_student(client, app, db, data):
+    data["class1"].name = "Grade 8A Science"
+    db.commit()
+    token = authenticate(client, app, data["teacher1"].id)
+    original = SPOKEN_ASSIGNMENT.replace("photosynthesis", "photosyn thesis")
+    target = data["student1"].id
+    form = {
+        "csrf_token": token,
+        "classroom_id": data["class1"].id,
+        "idempotency_key": "spoken-example",
+        "source_transcript": original,
+        "natural_text": SPOKEN_ASSIGNMENT,
+        "student_ids": target,
+        "targeting_mode": "selected",
+    }
+    for _ in range(2):
+        preview = client.post("/teacher/assignments", data=form)
+        assert preview.status_code == 200
+        assert original in preview.text and "Grade 8A Science" in preview.text
+        assert data["student1"].name in preview.text
+        assert "6:00 PM IST" in preview.text
+    draft = db.scalars(select(Assignment).where(Assignment.original_request == original)).one()
+    assert draft.status == "draft"
+    instructions = "Complete questions 1–10 from Chapter 4. Draw a labeled diagram of photosynthesis."
+    assert draft.instructions == instructions
+    assert draft.due_at.replace(tzinfo=UTC).astimezone(ZoneInfo("Asia/Kolkata")).date() == (
+        datetime.now(ZoneInfo("Asia/Kolkata")).date() + timedelta(days=1)
+    )
+    for _ in range(2):
+        assert client.post(
+            f"/teacher/assignments/{draft.id}/publish", data={"csrf_token": token}
+        ).status_code == 200
+    deliveries = db.scalars(select(NotificationDelivery).where(
+        NotificationDelivery.assignment_id == draft.id, NotificationDelivery.kind == "assignment_created"
+    )).all()
+    assert len(deliveries) == 1
+    authenticate(client, app, target)
+    view = client.get(f"/student/assignments/{draft.id}")
+    assert instructions in view.text and "6:00 PM IST" in view.text
+
 
 def test_cleanup_review_and_publish_only_approved_draft(client, app, db, data):
     data["class1"].name = "Grade 8A Science"
@@ -97,7 +144,10 @@ def test_cleanup_review_and_publish_only_approved_draft(client, app, db, data):
         ("Complete question 14 or 40 by tomorrow at 6 PM", "What exact question"),
         ("Complete question fourteen or forty by tomorrow at 6 PM", "What exact question"),
         ("For Studnt One: Read pages 10–12 by tomorrow evening", "Which student did you mean"),
-        ("Read pages 10–12 by tomorrow at 6", "Is the deadline time AM or PM?"),
+        ("Read pages 10–12 by tomorrow at 6", "Should this be due at 6 AM or 6 PM?"),
+        ("Read pages one through ten by tomorrow at six", "Should this be due at 6 AM or 6 PM?"),
+        (SPOKEN_ASSIGNMENT.replace("8A", "8B"), "Did you mean Grade 8A Science?"),
+        ("For Student One or Student Two: Read pages one through ten by tomorrow evening", "Which student did you mean"),
         ("Read pages 10–12", "When is this due?"),
     ],
 )
@@ -112,10 +162,15 @@ def test_clarification_keeps_input_and_creates_no_draft(client, app, db, data, s
             "classroom_id": data["class1"].id,
             "idempotency_key": "ambiguous-text",
             "natural_text": source,
+            "source_transcript": "Raw microphone transcript",
+            "student_ids": data["student1"].id,
+            "targeting_mode": "selected",
         },
     )
     assert result.status_code == 422
     assert question in result.text and source in result.text
+    assert "Raw microphone transcript" in result.text
+    assert f'value="{data["student1"].id}" checked' in result.text
     assert db.scalar(select(Assignment).where(Assignment.original_request == source)) is None
 
 
@@ -189,16 +244,17 @@ def test_recording_requires_authorized_class_csrf_and_enabled_provider(client, a
     class SpeechStub:
         def transcribe(self, audio, filename, content_type):
             assert (filename, content_type) == ("assignment.webm", "audio/webm")
-            if audio == b"failure":
+            if audio == WEBM + b"failure":
                 raise TranscriptionError("private provider details")
             return "Complete the energy worksheet by tomorrow afternoon."
 
     app.state.speech_provider = SpeechStub()
-    result = client.post(url, content=b"audio", headers=headers)
+    result = client.post(url, content=WEBM + b"audio", headers=headers)
     assert result.json() == {"text": "Complete the energy worksheet by tomorrow afternoon."}
-    error = client.post(url, content=b"failure", headers=headers)
+    error = client.post(url, content=WEBM + b"failure", headers=headers)
     assert error.status_code == 502 and "private provider details" not in error.text
     assert client.post(url, content=b"", headers=headers).status_code == 422
+    assert client.post(url, content=b"not a WebM file", headers=headers).status_code == 415
     assert (
         client.post(
             url, content=b"audio", headers={**headers, "Content-Type": "text/plain"}

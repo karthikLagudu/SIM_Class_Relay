@@ -15,6 +15,7 @@ from app.models import (
     ActivityEvent,
     Assignment,
     ClassMembership,
+    NotificationDelivery,
     ProgressEvent,
     School,
     StudentAssignmentState,
@@ -110,6 +111,21 @@ def _render_profile(
         requests[event.assignment_id].append(event)
     for reply, author in support_replies(db, assignment_ids, student_id):
         replies[reply.assignment_id].append((reply, author))
+    delivery_parts = defaultdict(list)
+    for delivery in db.scalars(
+        select(NotificationDelivery).where(
+            NotificationDelivery.kind == "student_support",
+            NotificationDelivery.user_id == student_id,
+            NotificationDelivery.classroom_id == classroom.id,
+            NotificationDelivery.assignment_id.in_(assignment_ids),
+            NotificationDelivery.idempotency_key.like("support-reply:%"),
+        ).order_by(NotificationDelivery.id)
+    ):
+        _, reply_id, *part = delivery.idempotency_key.split(":")
+        label = "Attachment" if part == ["attachment"] else (
+            f"Message (part {part[1]})" if len(part) == 2 else "Message"
+        )
+        delivery_parts[reply_id].append((label, delivery))
     latest_submissions = {}
     for submission_id, assignment_id in db.execute(
         select(Submission.id, Submission.assignment_id)
@@ -132,6 +148,7 @@ def _render_profile(
         can_reply=not coordinating and enrolled and not classroom.archived_at,
         requests=requests,
         replies=replies,
+        delivery_parts=delivery_parts,
         latest_submissions=latest_submissions,
         focus_id=focus_id,
         error=error,
@@ -231,7 +248,8 @@ def send_support_reply(
         ):
             raise AuthorizationError("Resource is outside your authorized scope")
         return redirect_with_message(
-            profile, "Help already sent.", anchor=f"assignment-{assignment_id}"
+            profile, "This reply is already saved. Check Telegram delivery below.",
+            anchor=f"assignment-{assignment_id}"
         )
     if assignment.status != "assigned":
         raise NotFoundError("This assignment is closed to new help replies.")
@@ -293,28 +311,14 @@ def send_support_reply(
                 entity_id=reply.id,
             )
         )
-        request.app.state.telegram_client.send(
-            db,
-            student,
-            None,
-            f"Your teacher sent help for {assignment.title}. "
-            "Open the assignment in Class Relay and read Help from your teacher.",
-            kind="student_support",
-            school_id=assignment.school_id,
-            classroom_id=class_id,
-            assignment_id=assignment.id,
-            idempotency_key=f"support-reply:{reply.id}",
-            reply_markup={
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "Open assignment",
-                            "callback_data": f"assignment:{assignment.id}",
-                        }
-                    ]
-                ]
-            },
+        delivery = request.app.state.notification_service.notify_student_support(
+            db, assignment, student, actor, classroom, reply,
         )
+        notice = {
+            "pending": "Reply saved in Class Relay and queued for Telegram.",
+            "skipped": "Reply saved in Class Relay. The student hasn’t connected Telegram.",
+            "logged": "Reply saved in Class Relay. Telegram delivery was simulated.",
+        }[delivery.status]
         db.commit()
         saved = True
     finally:
@@ -322,7 +326,7 @@ def send_support_reply(
             destination.unlink(missing_ok=True)
     return redirect_with_message(
         profile,
-        "Help sent. The student can read it on their assignment.",
+        notice,
         anchor=f"assignment-{assignment_id}",
     )
 

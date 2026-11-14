@@ -69,7 +69,7 @@ class LLMService:
             )
             db.flush()
             raise LLMInterpretationError(
-                "I could not understand that safely. Please include the task and an exact or relative deadline."
+                "The assignment parser couldn’t prepare a draft. Try again or enter the assignment manually."
             ) from exc
 
     def progress(self, db: Session, actor_id: int, text: str) -> ProgressIntent:

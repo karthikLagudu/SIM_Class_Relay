@@ -21,7 +21,7 @@ from app.services.authorization import (
     require_coordinator_school,
     workspace_roles,
 )
-from app.web.live import workspace_version
+from app.web.live import teacher_help_cursor, workspace_version
 
 WORKSPACES = {"coordinator": "Coordinator", "teacher": "Teacher", "student": "Student"}
 LIVE_PAGE = re.compile(
@@ -44,6 +44,7 @@ def render(request: Request, template: str, *, status_code: int = 200, **context
         context={
             "offline_demo": request.app.state.settings.telegram_mode == "log",
             "live_version": getattr(request.state, "live_version", None) if status_code == 200 else None,
+            "help_cursor": getattr(request.state, "help_cursor", None),
             "workspaces": workspaces,
             "workspace": role,
             "managed_schools": getattr(request.state, "managed_schools", ()),
@@ -74,11 +75,13 @@ def web_user(request: Request, db: Session = Depends(get_db)) -> User:
         ):
             request.state.managed_schools = coordinated_schools(db, user)
         if (
-            request.url.path.split("/", 2)[1] == "teacher"
+            workspace == "teacher"
             and "teacher" in request.state.workspace_roles
         ):
             classes = list_teacher_classes(db, user)
             request.state.teaching_classes = classes
+            if classes and request.method in {"GET", "POST"}:
+                request.state.help_cursor = teacher_help_cursor(db, user.id)
             request.state.teaching_schools = {
                 school.id: school
                 for school in db.scalars(

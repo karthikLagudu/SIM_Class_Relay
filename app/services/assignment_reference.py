@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.exceptions import AmbiguousReferenceError, NotFoundError
 from app.models import (
     Assignment,
+    Classroom,
     StudentAssignmentState,
     User,
 )
@@ -76,7 +77,12 @@ class AssignmentReferenceService:
             query = query.where(Assignment.classroom_id == classroom_id)
         return list(db.scalars(query.order_by(Assignment.due_at, Assignment.id)))
 
-    def for_student(self, db: Session, actor: User) -> list[Assignment]:
+    def for_student(
+        self, db: Session, actor: User, *, accepting_submissions: bool = False,
+    ) -> list[Assignment]:
+        closed_states = ["completed", "cancelled"]
+        if accepting_submissions:
+            closed_states.append("submitted")
         return list(
             db.scalars(
                 select(Assignment)
@@ -84,8 +90,11 @@ class AssignmentReferenceService:
                 .where(
                     Assignment.id.in_(student_work_scope(actor.id)),
                     StudentAssignmentState.student_id == actor.id,
-                    StudentAssignmentState.status.not_in(["completed", "cancelled"]),
+                    StudentAssignmentState.status.not_in(closed_states),
                     Assignment.status == "assigned",
+                    Assignment.classroom_id.in_(select(Classroom.id).where(
+                        Classroom.archived_at.is_(None)
+                    )),
                 )
                 .order_by(Assignment.due_at, Assignment.id)
             )

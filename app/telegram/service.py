@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import shlex
-from datetime import UTC, datetime
 
 from sqlalchemy import func, literal, select
 from sqlalchemy.dialects.sqlite import insert
@@ -19,16 +18,16 @@ from app.llm.service import LLMService
 from app.models import (
     Assignment,
     Classroom,
+    IdempotencyKey,
     NotificationDelivery,
     ProcessedTelegramUpdate,
     Reminder,
-    School,
     SchoolMembership,
     StudentAssignmentState,
     User,
 )
-from app.services.assignment import AssignmentService, get_student_state
-from app.services.assignment_reference import explicit_id, model_reference
+from app.services.assignment import get_student_state
+from app.services.assignment_reference import explicit_id
 from app.services.authorization import (
     coordinated_schools,
     coordinator_class_scope,
@@ -64,6 +63,7 @@ MENU_COMMANDS = {
 NUMBERED_COMMANDS = {
     "ack", "blocked", "submit", "assignment", "assignments", "progress", "assign_to", "ask",
 }
+WORK_CALLBACKS = {"choose_work", "work_page", "cancel_work"}
 
 
 class TelegramService:
@@ -71,12 +71,12 @@ class TelegramService:
         self.llm = llm
         self.client = client
         self.notifications = NotificationService(client)
-        self.assignments = AssignmentService(self.notifications)
         self.progress = ProgressService(self.notifications)
         self.submissions = SubmissionService(self.notifications)
         self.invites = InviteService()
         self.links = TelegramLinkService(client.settings)
         self.intent_router = TelegramIntentRouter(llm, client, self.notifications)
+        self.assignments = self.intent_router.teacher.assignments
 
     def _send_menu(
         self, db: Session, user: User | None, chat_id: str, *, prefix: str = "",
@@ -213,7 +213,7 @@ class TelegramService:
                 return {"ok": True, "result": "ignored"}
             message = {**callback_message, "from": callback.get("from"), "menu_callback": True}
             action, _, value = data.partition(":")
-            if action in NUMBERED_COMMANDS:
+            if action in NUMBERED_COMMANDS or action in WORK_CALLBACKS or action in {"publish_draft", "cancel_draft"}:
                 message["text"] = f"/{action} {value}"
             elif action in MENU_COMMANDS:
                 message["text"] = f"/{action}"
@@ -358,6 +358,32 @@ class TelegramService:
             return "unlinked"
         if not user.telegram_chat_id:
             user.telegram_chat_id = chat_id
+        if command.removeprefix("/") in WORK_CALLBACKS and message.get("menu_callback"):
+            fields = parts[1].split(":") if len(parts) == 2 else []
+            if len(fields) != 2 or any(
+                not field.isascii() or not field.isdigit() or len(field) > 19 for field in fields
+            ):
+                raise ValidationError("Tap an assignment in the latest list.")
+            return self.intent_router.student.choose_pending_work(
+                db, user, chat_id, command[1:], int(fields[0]), int(fields[1]),
+            )
+        group = message.get("media_group_id")
+        if isinstance(group, str) and group.isascii() and group.isdigit() and len(group) <= 32 and (
+            message.get("photo") or message.get("document")
+        ):
+            claimed = db.execute(
+                insert(IdempotencyKey)
+                .values(key=f"telegram:album:{user.id}:{group}", operation="telegram_album")
+                .on_conflict_do_nothing(index_elements=["key"])
+            )
+            if not claimed.rowcount:
+                return "album_extra"
+        if command in {"/publish_draft", "/cancel_draft"} and message.get("menu_callback"):
+            if len(parts) != 2:
+                raise ValidationError("Use the buttons on your latest assignment preview.")
+            return self.intent_router.teacher.confirm_assignment(
+                db, user, chat_id, parts[1], publish=command == "/publish_draft"
+            )
         if command == "/cancel" and len(parts) == 1:
             self.intent_router.context.clear(db, user, chat_id)
             self.client.send(db, user, chat_id, "Cleared the pending chat request.", kind="help")
@@ -382,7 +408,7 @@ class TelegramService:
                 f"New assignment for {classroom.name}\n\n"
                 "Send the instructions and the due date in one message. "
                 "For example, “Read chapter 3 and answer questions 1–4 by tomorrow at 5 pm.” "
-                "This will publish to the class. Send /cancel to stop.",
+                "You’ll see a draft before publishing. Send /cancel to stop.",
                 kind="help",
             )
             return "pending_assignment"
@@ -409,15 +435,29 @@ class TelegramService:
             state = get_student_state(db, assignment_id, user.id)
             if assignment.status != "assigned" or state.status in {"submitted", "completed", "cancelled", "needs_revision"}:
                 raise ValidationError("This assignment is closed to help requests.")
-            self.intent_router.context.set(
-                db, user, chat_id, assignment_id=assignment_id, pending_action="help_request",
-            )
+            conversation = self.intent_router.context
+            context = conversation.get(db, user, chat_id)
+            if not (
+                context and context.active_assignment_id == assignment_id
+                and context.pending_action == "help_request"
+                and (context.pending_payload_json or {}).get("event_id")
+                and state.status in {"blocked", "overdue"}
+            ):
+                event = self.progress.update(
+                    db, user, assignment_id, "blocked",
+                    "The student requested help in Telegram. A note may follow.",
+                )
+                conversation.set(
+                    db, user, chat_id, assignment_id=assignment_id,
+                    pending_action="help_request", payload={"event_id": event.id},
+                )
             self.client.send(
                 db, user, chat_id,
-                "Tell your teacher what you’re stuck on. Send /cancel to stop.",
+                "Help request sent to your teacher. Reply here to add what you’re stuck on. "
+                "Send /cancel to skip adding a note.",
                 kind="help",
             )
-            return f"pending_help:{assignment_id}"
+            return f"progress:{assignment_id}:blocked"
         if command == "/assign":
             classes = list_teacher_classes(db, user)
             if not classes:
@@ -438,7 +478,7 @@ class TelegramService:
                     "Enter the class number, what students should do, and when it is due.\n"
                     f"Example\n/assign {classes[0].id} Read chapter 3 and answer questions "
                     "1–4 by tomorrow at 5 pm.\n\n"
-                    "Sending that command publishes the assignment. Send /classes for the full list.",
+                    "This creates a preview. Send /classes for the full list.",
                     kind="help",
                     reply_markup={"inline_keyboard": [
                         [{"text": item.name[:60], "callback_data": f"assign_to:{item.id}"}]
@@ -449,7 +489,7 @@ class TelegramService:
             class_id = int(parts[1])
             natural_text = " ".join(parts[2:])
             classroom = require_teacher_class(db, user, class_id)
-            return self._publish_in_chat(db, user, chat_id, classroom, natural_text, update_id)
+            return self.intent_router.teacher.preview_assignment(db, user, chat_id, classroom, natural_text)
         if command in {"/ack", "/progress", "/blocked"}:
             if len(parts) < 2:
                 return "missing_assignment_id"
@@ -508,7 +548,8 @@ class TelegramService:
                 if not message.get("text"):
                     attachment = attachment.model_copy(update={"caption": body})
                 return self.intent_router.student.submit_attachment(
-                    db, user, chat_id, assignment_id, attachment, update_id
+                    db, user, chat_id, assignment_id, attachment, update_id,
+                    grouped=bool(message.get("media_group_id")),
                 )
             if not body:
                 require_active_class(db.get(Classroom, assignment.classroom_id))
@@ -528,7 +569,7 @@ class TelegramService:
                 )
                 self.client.send(
                     db, user, chat_id,
-                    f"Send your answer, a photo, or a file for assignment #{assignment_id}. "
+                    f"Send your answer or one attachment for {assignment.title}. "
                     "Your next message will be turned in. Send /cancel to stop.",
                     kind="submission_prompt",
                 )
@@ -585,37 +626,9 @@ class TelegramService:
             self._send_menu(db, user, chat_id, prefix="I did not recognize that command.\n\n")
             return "unknown"
         context = self.intent_router.context.get(db, user, chat_id)
-        if context and context.pending_action == "new_assignment":
+        if context and context.pending_action in {"new_assignment", "assignment_preview"}:
             classroom = require_teacher_class(db, user, context.pending_payload_json["class_id"])
             if not text or TelegramAttachment.from_message(message):
                 raise ValidationError("Send the assignment instructions and deadline as a message.")
-            return self._publish_in_chat(db, user, chat_id, classroom, text, update_id)
+            return self.intent_router.teacher.preview_assignment(db, user, chat_id, classroom, text)
         return self.intent_router.route(db, user, chat_id, text, message, update_id)
-
-    def _publish_in_chat(
-        self, db: Session, user: User, chat_id: str, classroom: Classroom, text: str, update_id: int,
-    ) -> str:
-        school = db.get(School, classroom.school_id)
-        parsed = self.llm.assignment(db, user.id, text, school.timezone, datetime.now(UTC))
-        teacher = self.intent_router.teacher
-        reference = model_reference(parsed.class_reference, text)
-        if reference and not teacher.class_options([classroom], reference):
-            raise ValidationError(f"You selected {classroom.name}. Check the class in your message.")
-        assignment = self.assignments.create(
-            db, user, classroom.id, parsed.title, parsed.instructions, parsed.due_at,
-            school.timezone, f"telegram:{update_id}:assignment",
-            student_ids=teacher.student_targets(db, classroom.id, parsed.student_targets),
-        )
-        self.intent_router.context.set(db, user, chat_id, assignment_id=assignment.id)
-        self.client.send(
-            db, user, chat_id,
-            f"Published #{assignment.id}: {assignment.title}\n"
-            f"{classroom.name} · Due "
-            f"{self.notifications.format_deadline(assignment.due_at, assignment.timezone)}"
-            "\n\nSee Notifications in Class Relay for Telegram delivery status.",
-            kind="teacher_confirmation",
-            school_id=assignment.school_id,
-            classroom_id=assignment.classroom_id,
-            assignment_id=assignment.id,
-        )
-        return f"assignment:{assignment.id}"

@@ -221,6 +221,11 @@ class StudentConversation:
         payload: dict,
     ) -> str:
         if not choices:
+            if action == "file_assignment":
+                raise NotFoundError(
+                    "None of your assignments are accepting work right now. "
+                    "Open My assignments to check what you’ve already turned in."
+                )
             raise NotFoundError("You have no active assignments for this action.")
         self.context.set(
             db,
@@ -229,15 +234,81 @@ class StudentConversation:
             pending_action=action,
             payload={**payload, "choice_ids": [item.id for item in choices]},
         )
-        self.client.send(
-            db,
-            user,
-            chat_id,
-            f"Which assignment is this for? {self.references.describe(choices)}. "
-            "Reply with #ID or the full title. Use /cancel to clear this request.",
-            kind="clarification",
+        self._send_assignment_choices(
+            db, user, chat_id, choices, payload["update_id"], action,
+            grouped=payload.get("grouped", False),
         )
         return "file_needs_context" if action == "file_assignment" else "student_needs_context"
+
+    def _send_assignment_choices(
+        self, db: Session, user: User, chat_id: str, choices: list[Assignment], update_id: int,
+        action: str, page: int = 0, *, grouped: bool = False, already_waiting: bool = False,
+    ) -> None:
+        start = page * ASSIGNMENTS_PER_PAGE
+        visible = choices[start:start + ASSIGNMENTS_PER_PAGE]
+        classes = {
+            classroom.id: classroom.name
+            for classroom in db.scalars(select(Classroom).where(
+                Classroom.id.in_({item.classroom_id for item in visible})
+            ))
+        }
+        keyboard = [[{
+            "text": f"{item.title[:44]} · {classes[item.classroom_id][:24]}",
+            "callback_data": f"choose_work:{update_id}:{item.id}",
+        }] for item in visible]
+        navigation = []
+        if page:
+            navigation.append({"text": "Previous", "callback_data": f"work_page:{update_id}:{page-1}"})
+        if start + ASSIGNMENTS_PER_PAGE < len(choices):
+            navigation.append({"text": "Next", "callback_data": f"work_page:{update_id}:{page+1}"})
+        if navigation:
+            keyboard.append(navigation)
+        keyboard.append([{"text": "Cancel", "callback_data": f"cancel_work:{update_id}:0"}])
+        body = "I saved your attachment for now. Tap the assignment it belongs to." if action == "file_assignment" else (
+            "Tap the assignment you want to update."
+        )
+        if grouped:
+            body += "\nClass Relay accepts one attachment per submission. Only the first item in this group is held."
+        if already_waiting:
+            body += "\nYour earlier attachment is still waiting. To replace it, tap Cancel and send the new file again."
+        body += "\n\n" + "\n".join(
+            f"{item.title[:95]} · {classes[item.classroom_id][:60]}\n"
+            f"Due {self.notifications.format_deadline(item.due_at, item.timezone)}" for item in visible
+        )
+        self.client.send(
+            db, user, chat_id, body, kind="clarification", reply_markup={"inline_keyboard": keyboard},
+        )
+
+    def choose_pending_work(
+        self, db: Session, user: User, chat_id: str, action: str, request_id: int, value: int,
+    ) -> str:
+        context = self.context.get(db, user, chat_id)
+        payload = (context.pending_payload_json or {}) if context else {}
+        if not context or context.pending_action not in {"file_assignment", "student_intent"} or payload.get("update_id") != request_id:
+            raise NotFoundError("That choice has expired. Open My assignments or send your work again.")
+        if action == "cancel_work":
+            self.context.clear(db, user, chat_id)
+            self.client.send(db, user, chat_id, "Cancelled. Your pending work was not turned in.", kind="help")
+            return "context_cleared"
+        choices = self._current_choices(db, user, context)
+        if action == "work_page":
+            if not choices or value * ASSIGNMENTS_PER_PAGE >= len(choices):
+                raise NotFoundError("Those choices are no longer available. Send your work again.")
+            self._send_assignment_choices(
+                db, user, chat_id, choices, request_id, context.pending_action, value,
+                grouped=payload.get("grouped", False),
+            )
+            return "assignment_choices"
+        return self._resume_student(db, user, chat_id, f"#{value}", context)
+
+    def _current_choices(self, db: Session, user: User, context: ConversationContext) -> list[Assignment]:
+        payload = context.pending_payload_json or {}
+        attachment = context.pending_action == "file_assignment"
+        submissions = attachment or payload.get("intent", {}).get("intent") in {
+            "submit_text", "submit_attachment",
+        }
+        allowed = self.references.for_student(db, user, accepting_submissions=submissions)
+        return [item for item in allowed if item.id in payload.get("choice_ids", [])]
 
     def route(
         self,
@@ -254,21 +325,31 @@ class StudentConversation:
         attachment = TelegramAttachment.from_message(message)
         if attachment:
             if context and context.pending_action == "file_assignment":
-                raise AmbiguousReferenceError(
-                    "I am already holding an attachment. Reply with the assignment #ID or use /cancel before sending another."
-                )
+                pending = context.pending_payload_json
+                choices = self._current_choices(db, user, context)
+                if choices:
+                    self._send_assignment_choices(
+                        db, user, chat_id, choices, pending["update_id"], context.pending_action,
+                        grouped=pending.get("grouped", False), already_waiting=True,
+                    )
+                    return "file_needs_context"
+                self.context.clear(db, user, chat_id)
             bound_id = reply_id or (
                 context.active_assignment_id
                 if context and context.pending_action == "submission"
                 else None
             )
-            payload = {"attachment": attachment.model_dump(mode="json"), "update_id": update_id}
+            grouped = bool(message.get("media_group_id"))
+            payload = {
+                "attachment": attachment.model_dump(mode="json"), "update_id": update_id,
+                "grouped": grouped,
+            }
             if bound_id is None:
                 return self._ask_student_assignment(
                     db,
                     user,
                     chat_id,
-                    assignments,
+                    self.references.for_student(db, user, accepting_submissions=True),
                     action="file_assignment",
                     payload=payload,
                 )
@@ -280,10 +361,12 @@ class StudentConversation:
                 pending_action="file_assignment",
                 payload={**payload, "choice_ids": [assignment.id]},
             )
-            return self.submit_attachment(db, user, chat_id, assignment.id, attachment, update_id)
+            return self.submit_attachment(
+                db, user, chat_id, assignment.id, attachment, update_id, grouped=grouped,
+            )
 
         if context and context.pending_action in {"file_assignment", "student_intent"}:
-            return self._resume_student(db, user, chat_id, text, context, assignments)
+            return self._resume_student(db, user, chat_id, text, context)
         if context and context.pending_action in {"progress", "help_request"}:
             assignment = self.references.choose(
                 assignments, f"#{context.active_assignment_id}", exact=True
@@ -298,7 +381,11 @@ class StudentConversation:
             if not text or len(text) > 2000:
                 raise LLMInterpretationError("Send a short note so your teacher can see the update.")
             status = "blocked" if help_request else "in_progress"
-            self.progress.update(db, user, assignment.id, status, text, percent)
+            event_id = (context.pending_payload_json or {}).get("event_id") if help_request else None
+            if event_id:
+                self.progress.add_help_details(db, user, assignment.id, event_id, text)
+            else:
+                self.progress.update(db, user, assignment.id, status, text, percent)
             self.context.set(db, user, chat_id, assignment_id=assignment.id)
             reply = "Help requested. Your teacher can see your note." if help_request else "Progress saved."
             self.client.send(db, user, chat_id, reply, kind="progress")
@@ -339,6 +426,8 @@ class StudentConversation:
             not parsed.message.strip() or " ".join(parsed.message.split()) not in " ".join(text.split())
         ):
             raise LLMInterpretationError("Include your answer or use /submit ID followed by the work.")
+        if parsed.intent in {"submit_text", "submit_attachment"}:
+            assignments = self.references.for_student(db, user, accepting_submissions=True)
         reference = model_reference(parsed.assignment_reference, text)
         if not reference:
             focus_id = reply_id or (context.active_assignment_id if context else None)
@@ -364,10 +453,9 @@ class StudentConversation:
         chat_id: str,
         text: str,
         context: ConversationContext,
-        assignments: list[Assignment],
     ) -> str:
         payload = context.pending_payload_json or {}
-        choices = [item for item in assignments if item.id in payload.get("choice_ids", [])]
+        choices = self._current_choices(db, user, context)
         if not choices:
             self.context.clear(db, user, chat_id)
             raise NotFoundError("The assignments for that request are no longer available.")
@@ -375,12 +463,15 @@ class StudentConversation:
             assignment = self.references.choose(choices, text, exact=True)
         except (AmbiguousReferenceError, NotFoundError) as exc:
             raise AmbiguousReferenceError(
-                f"Reply with one of these assignment IDs: {self.references.describe(choices)}. Use /cancel to clear the request."
+                "Tap an assignment in the latest list or reply with its exact title."
             ) from exc
         update_id = payload["update_id"]
         if context.pending_action == "file_assignment":
             attachment = TelegramAttachment.model_validate(payload["attachment"])
-            return self.submit_attachment(db, user, chat_id, assignment.id, attachment, update_id)
+            return self.submit_attachment(
+                db, user, chat_id, assignment.id, attachment, update_id,
+                grouped=payload.get("grouped", False),
+            )
         parsed = StudentIntent.model_validate(payload["intent"])
         return self._apply_student(db, user, chat_id, assignment, parsed, update_id)
 
@@ -392,12 +483,17 @@ class StudentConversation:
         assignment_id: int,
         attachment: TelegramAttachment,
         update_id: int,
+        *,
+        grouped: bool = False,
     ) -> str:
         submission = self.files.submit(db, user, assignment_id, attachment, update_id)
         self.context.set(db, user, chat_id, assignment_id=assignment_id)
-        self.client.send(
-            db, user, chat_id, f"Submission #{submission.id} received.", kind="submission"
-        )
+        assignment = db.get(Assignment, assignment_id)
+        classroom = db.get(Classroom, assignment.classroom_id)
+        body = f"Work turned in · {assignment.title}\n{classroom.name}"
+        if grouped:
+            body += "\n\nOnly the first item in the group was turned in. Class Relay accepts one attachment per submission."
+        self.client.send(db, user, chat_id, body, kind="submission")
         return f"submission:{submission.id}"
 
     def _apply_student(
@@ -414,7 +510,8 @@ class StudentConversation:
                 db, user, chat_id, assignment_id=assignment.id, pending_action="submission"
             )
             self.client.send(
-                db, user, chat_id, "Send the file or photo next.", kind="submission_prompt"
+                db, user, chat_id,
+                f"Send one file or photo for {assignment.title}.", kind="submission_prompt",
             )
             return f"pending_submission:{assignment.id}"
         if parsed.intent == "submit_text":

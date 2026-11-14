@@ -37,6 +37,9 @@
         <div class="editor-field"><label for="draft-title">Title</label><input id="draft-title" name="title" value="{{ form.get('title', assignment.title) }}" maxlength="240" required {{ invalid(errors,'title') }}>{{ field_error(errors,'title') }}</div>
         <div class="editor-field"><label for="draft-instructions">Student-facing instructions</label><textarea id="draft-instructions" name="instructions" rows="5" maxlength="5000" required {{ invalid(errors,'instructions') }}>{{ form.get('instructions', assignment.instructions) }}</textarea>{{ field_error(errors,'instructions') }}</div>
         <div class="editor-field"><label for="draft-deadline">Deadline ({{ assignment.timezone }})</label><input type="datetime-local" id="draft-deadline" name="due_at" value="{{ form.get('due_at', assignment.due_at|local_input(assignment.timezone)) }}" required {{ invalid(errors,'due_at') }}>{{ field_error(errors,'due_at') }}</div>
+        {% if assignment.original_request %}
+        <div class="work-content"><h3>Original text or transcript</h3><p class="preserve-lines">{{ assignment.original_request }}</p></div>
+        {% endif %}
       </div>
       <fieldset class="student-picker" {% if errors.get('recipients') %}aria-describedby="recipients-error"{% endif %}>
         <legend>Recipients</legend>
@@ -49,7 +52,12 @@
     <div class="actions"><button class="primary">Save draft changes</button><a class="ghost-button button-link" href="{{ assignment|assignment_path(workspace) }}#instructions">Back to draft review</a></div>
   </form>
   {% else %}
-  <p class="preserve-lines">{{ assignment.instructions }}</p>
+  {% if assignment.status == 'draft' and assignment.original_request %}
+  <div class="form-grid">
+    <div class="work-content"><h3>Corrected instructions</h3><p class="preserve-lines">{{ assignment.instructions }}</p></div>
+    <div class="work-content"><h3>Original text or transcript</h3><p class="preserve-lines">{{ assignment.original_request }}</p></div>
+  </div>
+  {% else %}<p class="preserve-lines">{{ assignment.instructions }}</p>{% endif %}
   <dl class="details-grid">
     <div><dt>Class</dt><dd>{{ classroom.name }}</dd></div>
     <div><dt>Created by</dt><dd>{{ author.name }}</dd></div>
@@ -67,12 +75,6 @@
   {% elif assignment.status == "cancelled" %}
   <p class="notice">This assignment is closed. Students cannot submit new work and future reminders have stopped.</p>
   {% endif %}
-  {% endif %}
-  {% if assignment.status == 'draft' and assignment.original_request %}
-  <details class="disclosure-inline section-divider">
-    <summary>Original text or transcript</summary>
-    <p class="preserve-lines">{{ assignment.original_request }}</p>
-  </details>
   {% endif %}
 </section>
 

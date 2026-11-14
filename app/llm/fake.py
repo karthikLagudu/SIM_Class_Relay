@@ -7,8 +7,12 @@ from app.llm.assignment_text import (
     AMBIGUOUS_NUMBER,
     CLASS_QUALIFIER,
     GRADE_REFERENCE,
+    MISSING_RANGE_END,
+    QUESTION_REFERENCE,
     RECIPIENT_PREFIX,
+    normalize_spoken_references,
     parse_known_deadline,
+    recipient_references,
     split_deadline,
 )
 from app.llm.base import LLMProvider
@@ -16,11 +20,18 @@ from app.llm.schemas import AssignmentIntent, ProgressIntent, StudentIntent, Tea
 
 WORK_TYPOS = {
     "qstns": "questions",
+    "qns": "questions",
     "qstn": "question",
     "questons": "questions",
     "frm": "from",
+    "chpter": "chapter",
     "chptr": "chapter",
     "complet": "complete",
+    "compleet": "complete",
+    "submt": "submit",
+    "pgs": "pages",
+    "labled": "labeled",
+    "photosyntehsis": "photosynthesis",
     "uplod": "upload",
     "workseet": "worksheet",
 }
@@ -38,7 +49,7 @@ class DemoLLM(LLMProvider):
             return AssignmentIntent(
                 intent="clarify",
                 title="Clarification needed",
-                instructions=clean or "Missing details",
+                instructions=clean[:5000] if len(clean) >= 3 else "Missing details",
                 due_at=now + timedelta(days=1),
                 confidence=0.2,
                 clarification_question=question,
@@ -47,6 +58,9 @@ class DemoLLM(LLMProvider):
         if len(clean) < 8 or "???" in clean:
             return clarify("What should students do, and when is it due?")
         work, expression = split_deadline(clean)
+        work = normalize_spoken_references(work)
+        if missing := MISSING_RANGE_END.search(work):
+            return clarify(f"What is the last number in the range starting at {missing[1]}?")
         try:
             due = parse_known_deadline(expression or "", timezone_name, now)
         except ValueError as exc:
@@ -66,20 +80,25 @@ class DemoLLM(LLMProvider):
             suffix = CLASS_QUALIFIER.match(work, match.end())
             end = suffix.end(1) if suffix else match.end()
             class_reference = work[match.start() : end]
-            work = work[: match.start()] + work[end:]
+            before = re.sub(r"\b(?:for|to)\s*$", "", work[: match.start()], flags=re.IGNORECASE)
+            work = before + " " + work[end:].lstrip(" :,-")
         student_targets = []
         addressed = RECIPIENT_PREFIX.match(work)
         if addressed:
-            references = addressed[1] or addressed[2]
-            student_targets = [
-                name.strip()
-                for name in re.split(r",|\s+and\s+", references, flags=re.IGNORECASE)
-                if name.strip()
-            ]
+            student_targets = recipient_references(addressed)
             work = work[addressed.end() :]
         work = re.sub(r"^(?:give|gve|assign)\b\s*", "", work, flags=re.IGNORECASE).strip(" :,-")
         work = re.sub(r"[^\S\n]+", " ", work)
-        work = re.sub(r"\b\w+\b", lambda match: WORK_TYPOS.get(match[0].lower(), match[0]), work)
+        work = re.sub(r"(?<!\n)\n(?![ \t]*(?:\n|[-*] |\d+[.)] ))", " ", work)
+        work = re.sub(r" {2,}", " ", work)
+        work = re.sub(
+            r"\b\w+\b",
+            lambda match: WORK_TYPOS.get(
+                match[0].lower() if match.start() == 0 else match[0], match[0]
+            ),
+            work,
+        )
+        work = re.sub(r"\bch\.?(?=\s+\d)", "Chapter", work, flags=re.IGNORECASE)
         work = re.sub(
             r"(\b(?:questions|pages|exercises)\s+\d+)\s*(?:\bto\b|[-–])\s*(?=\d)",
             r"\1–",
@@ -94,8 +113,11 @@ class DemoLLM(LLMProvider):
         instructions = work[0].upper() + work[1:]
         if instructions[-1] not in ".!?":
             instructions += "."
-        title = re.sub(r"^(?:Complete|Do|Finish)\s+", "", instructions.splitlines()[0])
+        first_sentence = re.split(r"[.!?]\s+|\n", instructions, maxsplit=1)[0]
+        title = re.sub(r"^(?:Complete|Do|Finish)\s+", "", first_sentence)
         title = title.rstrip(".!?")
+        if QUESTION_REFERENCE.match(title):
+            title = "Selected questions"
         if len(title) > 72:
             title = title[:72].rsplit(" ", 1)[0] or title[:72]
         return AssignmentIntent(
@@ -158,16 +180,14 @@ class DemoLLM(LLMProvider):
             )
         assignment = self.interpret_assignment(clean, timezone_name, now)
         return TeacherIntent(
-            intent="create_assignment" if assignment.intent == "create_assignment" else "clarify",
+            intent="create_assignment",
             class_reference=assignment.class_reference,
             student_targets=assignment.student_targets,
             title=assignment.title,
             instructions=assignment.instructions,
             due_expression=clean,
             due_at=assignment.due_at,
-            confidence=assignment.confidence,
-            requires_clarification=assignment.intent == "clarify",
-            clarification_question=assignment.clarification_question,
+            confidence=0.92,
         )
 
     def interpret_student(self, text: str) -> StudentIntent:

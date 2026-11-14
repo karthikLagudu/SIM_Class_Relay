@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
@@ -18,6 +19,7 @@ from app.models import (
     Reminder,
     School,
     StudentAssignmentState,
+    StudentSupportReply,
     Submission,
     User,
 )
@@ -42,6 +44,7 @@ class DeliveryAttempt:
     body: str
     reply_markup: dict | None
     reserved_until: datetime
+    document: tuple[Path, str, str] | None = None
 
 
 class DeliveryProcessor:
@@ -80,9 +83,15 @@ class DeliveryProcessor:
             if not attempt or not self._still_reserved(attempt):
                 continue
             try:
-                external_id = self.telegram.send_message(
-                    attempt.chat_id, attempt.body, attempt.reply_markup
-                )
+                if attempt.document:
+                    path, filename, mime_type = attempt.document
+                    external_id = self.telegram.send_document(
+                        attempt.chat_id, path, filename, mime_type, attempt.body,
+                    )
+                else:
+                    external_id = self.telegram.send_message(
+                        attempt.chat_id, attempt.body, attempt.reply_markup
+                    )
             except TelegramDeliveryError as exc:
                 self._finish(attempt, None, str(exc), now or datetime.now(UTC))
             else:
@@ -134,6 +143,25 @@ class DeliveryProcessor:
         ):
             raise AuthorizationError("The deadline has changed")
         return assignment
+
+    @staticmethod
+    def _support_document(db: Session, delivery: NotificationDelivery) -> tuple[Path, str, str] | None:
+        key = delivery.idempotency_key or ""
+        if delivery.kind != "student_support" or not key.endswith(":attachment"):
+            return None
+        prefix, _, suffix = key.partition(":")
+        reply_id, _, _ = suffix.partition(":")
+        if prefix != "support-reply" or not reply_id.isascii() or not reply_id.isdigit() or len(reply_id) > 19:
+            raise NotFoundError("The help attachment was not found")
+        reply = db.get(StudentSupportReply, int(reply_id))
+        if not reply or not reply.stored_file_path or (reply.student_id, reply.assignment_id) != (
+            delivery.user_id, delivery.assignment_id,
+        ):
+            raise NotFoundError("The help attachment was not found for this student")
+        return (
+            Path(reply.stored_file_path), reply.original_filename or "Help attachment",
+            reply.mime_type or "application/octet-stream",
+        )
 
     @staticmethod
     def _staff_assignment(
@@ -194,6 +222,7 @@ class DeliveryProcessor:
             reminder = self._reminder(db, delivery)
             try:
                 assignment = self._eligible(db, delivery)
+                document = self._support_document(db, delivery)
                 if reminder and assignment:
                     deferred_until = self._validate_reminder(db, reminder, assignment, now)
                     if deferred_until:
@@ -208,7 +237,8 @@ class DeliveryProcessor:
             reserved_until = now + CLAIM_TIME
             delivery.next_attempt_at = reserved_until
             return DeliveryAttempt(
-                delivery.id, delivery.chat_id, delivery.body, delivery.reply_markup, reserved_until
+                delivery.id, delivery.chat_id, delivery.body, delivery.reply_markup, reserved_until,
+                document,
             )
 
     def _finish(

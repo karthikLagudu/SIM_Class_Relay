@@ -247,6 +247,18 @@ def test_natural_language_teacher_and_student_flows(app, db, data):
         },
     }
     result = app.state.telegram_service.process(db, teacher_create)
+    assert result["result"] == "assignment_preview"
+    context = app.state.telegram_service.intent_router.context.get(db, data["teacher1"], "101")
+    nonce = context.pending_payload_json["nonce"]
+    result = app.state.telegram_service.process(db, {
+        "update_id": 509,
+        "callback_query": {
+            "id": "confirm-draft",
+            "from": {"id": 101},
+            "message": {"chat": {"id": 101}},
+            "data": f"publish_draft:{nonce}",
+        },
+    })
     assignment_id = int(str(result["result"]).split(":")[-1])
     db.commit()
     move = {
